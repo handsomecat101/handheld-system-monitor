@@ -1,0 +1,9 @@
+SystemMonitor.config.json
+dist/*.exe
+dist/*.zip
+*.user
+*.log
+.vs/
+.vscode/
+Thumbs.db
+Desktop.ini
