@@ -42,4 +42,18 @@ Invoke-ps2exe `
     -STA `
     -DPIAware
 
+Copy-Item -LiteralPath $iconPath -Destination (Join-Path $outputDir 'SystemMonitor.ico') -Force
+
+$amdSourceDir = Join-Path $repoRoot 'amd'
+$amdTargetDir = Join-Path $outputDir 'amd'
+if (Test-Path -LiteralPath $amdSourceDir) {
+    if (-not (Test-Path -LiteralPath $amdTargetDir)) {
+        New-Item -ItemType Directory -Path $amdTargetDir -Force | Out-Null
+    }
+    Copy-Item -Path (Join-Path $amdSourceDir '*') -Destination $amdTargetDir -Recurse -Force
+    Write-Host "Copied runtime dependencies: $amdTargetDir"
+} else {
+    Write-Warning "Missing runtime dependency folder: $amdSourceDir"
+}
+
 Write-Host "Built: $outputPath"

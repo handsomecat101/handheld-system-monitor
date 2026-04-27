@@ -9,6 +9,11 @@ A Windows desktop widget built with PowerShell + WPF for monitoring:
 - download / upload speed
 - Wi-Fi / network name
 - desktop internet loss notifications
+- direct EC fan control (Low/Medium/Max/Auto) without MotionAssistant sync
+- fan profile presets: Low / Medium / Max / Auto
+- custom TDP slider (4W to 25W)
+- refresh rate switch 60Hz / 120Hz
+- optional right-edge sidebar mode with manual hide/reveal handle
 
 ## Features
 
@@ -26,6 +31,11 @@ A Windows desktop widget built with PowerShell + WPF for monitoring:
 |-- assets/
 |   |-- SystemMonitor.ico
 |   `-- SystemMonitor.png
+|-- amd/
+|   |-- inpoutx64.dll
+|   |-- ryzenadj.exe
+|   |-- WinRing0x64.dll
+|   `-- WinRing0x64.sys
 |-- dist/
 |-- scripts/
 |   `-- Build-SystemMonitorExe.ps1
@@ -71,6 +81,7 @@ dist\SystemMonitor.exe
 - CPU power depends on hardware sensor support. Some PCs expose it correctly, some do not.
 - Battery data is only available on laptops / handhelds with a battery.
 - The widget tries to find `LibreHardwareMonitorLib.dll` from common installed locations on the machine.
+- `amd/` contains local runtime binaries used by this app (`ryzenadj`, `inpoutx64`) so it can run independently from MotionAssistant.
 - `SystemMonitor.config.json` is generated locally and is intentionally ignored from git.
 
 ## Suggested GitHub Setup

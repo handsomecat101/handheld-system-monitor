@@ -1,4 +1,5 @@
 SystemMonitor.config.json
+dist/
 dist/*.exe
 dist/*.zip
 *.user
