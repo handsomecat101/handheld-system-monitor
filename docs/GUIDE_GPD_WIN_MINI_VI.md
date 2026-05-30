@@ -29,8 +29,10 @@ Cách khuyên dùng cho người test:
 
 1. Tải file ZIP đầy đủ: `releases/SystemMonitor-hotfix38.zip`.
 2. Giải nén ra một thư mục bình thường.
-3. Double click `SystemMonitor.exe`.
-4. Nếu TDP/Fan không hoạt động, thử chạy bằng quyền Administrator.
+3. Double click `Run-SystemMonitor-Admin.cmd`.
+4. Bấm đồng ý khi Windows hỏi quyền Administrator.
+
+Lưu ý quan trọng: điều khiển TDP cần quyền Administrator. Nếu chỉ chạy `SystemMonitor.exe` không có quyền Admin, giao diện monitor có thể vẫn mở nhưng chỉnh TDP có thể không hoạt động.
 
 Link tải trực tiếp:
 

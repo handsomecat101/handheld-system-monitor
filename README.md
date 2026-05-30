@@ -10,11 +10,19 @@ Recommended download for testers:
 
 [Download SystemMonitor-hotfix38.zip](https://github.com/handsomecat101/handheld-system-monitor/raw/next/releases/SystemMonitor-hotfix38.zip)
 
+How to run the ZIP package:
+
+1. Extract the ZIP.
+2. Double-click `Run-SystemMonitor-Admin.cmd`.
+3. Accept the Windows Administrator prompt.
+
+Administrator permission is required for TDP control. If you run only `SystemMonitor.exe` without Administrator permission, the monitor UI may open, but TDP control may not apply.
+
 Direct EXE only:
 
 [Download SystemMonitor.exe](https://github.com/handsomecat101/handheld-system-monitor/raw/next/dist-hotfix38/SystemMonitor.exe)
 
-Use the ZIP if you want the app to run correctly right away, because it includes the required `amd/` runtime files next to the EXE.
+Use the ZIP if you want the app to run correctly right away, because it includes the required `amd/` runtime files and the Admin launcher next to the EXE.
 
 ## What It Does
 
@@ -75,11 +83,13 @@ TDP control, monitor cards, UI layout, language switching, and gyro availability
 
 For testers:
 
-1. Download or clone this repo.
-2. Open the project folder.
-3. Double-click `Launch-TdpDrainWidget.cmd`.
-4. If Windows blocks it, unblock the file or run it from PowerShell.
-5. For TDP/fan features, running as Administrator may be required because the app uses low-level hardware access.
+1. Download `SystemMonitor-hotfix38.zip`.
+2. Extract the ZIP.
+3. Double-click `Run-SystemMonitor-Admin.cmd`.
+4. Accept the Administrator prompt.
+5. If Windows blocks it, unblock the file or run it from PowerShell.
+
+TDP control requires Administrator permission because the app uses low-level hardware access.
 
 Run from source:
 
