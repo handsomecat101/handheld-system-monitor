@@ -100,3 +100,37 @@
 ---
 
 *PROJECT_STATE.md - Cập nhật gần nhất: 2026-04-28*
+
+---
+
+## Cập nhật handoff 2026-05-29
+
+> Ghi chú: phần cũ của file này có đoạn bị lỗi encoding và vẫn nhắc `dist-hotfix16`. Trạng thái đúng hiện tại là phần cập nhật bên dưới.
+
+| Mục | Trạng thái hiện tại |
+|-----|---------------------|
+| Bản chạy mới nhất | `dist-hotfix38\SystemMonitor.exe` |
+| Launcher | `Launch-TdpDrainWidget.cmd` đang ưu tiên `dist-hotfix38` |
+| Source chính | `TdpDrainWidget.ps1` |
+| Branch | `next` |
+| Remote | `https://github.com/handsomecat101/handheld-system-monitor.git` |
+| Thiết bị mục tiêu | GPD Win Mini Ryzen 7 7840U |
+| Tình trạng release | Internal hotfix, chưa nên coi là release ổn định vì fan control còn lỗi |
+
+### Đã làm được
+
+- Widget monitor CPU power/temp, battery ETA, power flow, network.
+- Điều khiển TDP qua `ryzenadj` với preset và custom slider.
+- UI đã có compact/full, pin, settings, chuyển ngôn ngữ ENG/VIE.
+- Gyro có badge Available/Unavailable và nút On/Off đơn giản, hiển thị `Handheld Mode`.
+- Đã sửa nhiều lỗi UI: nút X ngoài cùng, settings cùng theme, graph CPU/PowerFlow không tràn khỏi card.
+- Charge limit đã bị loại khỏi hướng tính năng vì không ngắt sạc thật được trên phần cứng hiện tại.
+
+### Đang nghẽn
+
+- Fan control chưa ổn định trên máy thật. App ghi được PWM EC nhưng RPM vẫn có lúc 0 và quạt không chạy. Đây là ưu tiên số 1 trước khi phát triển tính năng khác.
+- Working tree đang có nhiều thay đổi và nhiều thư mục `dist-hotfix*` chưa track. Không tự ý commit/push khi chưa chốt release strategy.
+
+### File handoff chính
+
+- Đọc tiếp `agent team\HANDOFF_CURRENT.md` trước khi làm việc.

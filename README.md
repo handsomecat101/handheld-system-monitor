@@ -1,91 +1,122 @@
-# System Monitor Widget
+﻿# System Monitor Widget for GPD Win Mini
 
-A Windows desktop widget built with PowerShell + WPF for monitoring:
+A lightweight Windows desktop widget for monitoring and quick handheld controls. The app is built with PowerShell + WPF and is tuned around the **GPD Win Mini Ryzen 7 7840U** workflow: small screen, quick TDP changes, fan mode buttons, battery/power awareness, and simple status cards while gaming.
 
-- CPU power when the hardware backend exposes it
-- battery drain / charging flow
-- battery ETA
-- internet online / offline state
-- download / upload speed
-- Wi-Fi / network name
-- desktop internet loss notifications
-- direct EC fan control (Low/Medium/Max/Auto) without MotionAssistant sync
-- fan profile presets: Low / Medium / Max / Auto
-- custom TDP slider (4W to 25W)
-- refresh rate switch 60Hz / 120Hz
-- optional right-edge sidebar mode with manual hide/reveal handle
+![System Monitor Widget screenshot](docs/images/system-monitor-widget-current.png)
 
-## Features
+## What It Does
 
-- Clean floating widget UI
-- Compact mode and full mode
-- Tray icon with show/hide controls
-- Startup with Windows toggle
-- Desktop notification when internet is lost or restored
-- Custom app icon for EXE, tray, and taskbar
+- Shows realtime CPU package power, CPU temperature, battery state, battery ETA, network status, and upload/download speed.
+- Lets you switch TDP quickly with presets and a custom 4W-25W slider through bundled `ryzenadj`.
+- Provides fan profile buttons: `Off`, `Low`, `Medium`, `Max`, `Auto`.
+- Detects handheld gyro availability and exposes a simple `Off/On` switch in the UI.
+- Includes compact/full view, pin toggle, display settings, and ENG/VIE language switch.
+- Can be launched as a normal local Windows app without Motion Assistant.
 
-## Project Layout
+## GPD Win Mini Focus
+
+This project is intended as a practical replacement-style widget for GPD Win Mini users when the stock Motion Assistant workflow is not convenient or not working well.
+
+Best-fit use cases:
+
+- Quickly lower TDP for battery life.
+- Raise TDP while plugged in for games.
+- Watch battery drain and estimated runtime.
+- Keep a compact system monitor open while using a handheld screen.
+- Test fan/TDP behavior across games and firmware versions.
+
+## Current Status
+
+Latest local test build in this repo:
 
 ```text
-.
-|-- assets/
-|   |-- SystemMonitor.ico
-|   `-- SystemMonitor.png
-|-- amd/
-|   |-- inpoutx64.dll
-|   |-- ryzenadj.exe
-|   |-- WinRing0x64.dll
-|   `-- WinRing0x64.sys
-|-- dist/
-|-- scripts/
-|   `-- Build-SystemMonitorExe.ps1
-|-- Launch-TdpDrainWidget.cmd
-|-- README.md
-`-- TdpDrainWidget.ps1
+dist-hotfix38\SystemMonitor.exe
 ```
 
-## Run From Source
-
-1. Open PowerShell.
-2. Go to the repo folder.
-3. Run:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Sta -File .\TdpDrainWidget.ps1
-```
-
-Or just double-click:
+Recommended launcher:
 
 ```text
 Launch-TdpDrainWidget.cmd
 ```
 
-## Build EXE
+The launcher automatically opens the newest available hotfix build, currently `dist-hotfix38`.
 
-This project uses `ps2exe`.
+## Known Important Limitation
 
-Run:
+Fan control is still being validated on the real GPD Win Mini 7840U.
+
+The app currently writes EC/PWM directly through the bundled `inpoutx64.dll`. On the test device, the UI can report that PWM was applied, but the fan may still stay at `0 rpm`. This means fan control should be treated as experimental until the EC register/mode handling is confirmed.
+
+TDP control, monitor cards, UI layout, language switching, and gyro availability display are further along than fan control.
+
+## Download / Run
+
+For testers:
+
+1. Download or clone this repo.
+2. Open the project folder.
+3. Double-click `Launch-TdpDrainWidget.cmd`.
+4. If Windows blocks it, unblock the file or run it from PowerShell.
+5. For TDP/fan features, running as Administrator may be required because the app uses low-level hardware access.
+
+Run from source:
 
 ```powershell
-.\scripts\Build-SystemMonitorExe.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -Sta -File .\TdpDrainWidget.ps1
 ```
 
-The built EXE is written to:
+## Build EXE
+
+Install `ps2exe` first if needed:
+
+```powershell
+Install-Module ps2exe -Scope CurrentUser
+```
+
+Build a new hotfix EXE:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-SystemMonitorExe.ps1 -OutputPath .\dist-hotfix39\SystemMonitor.exe -Version 1.0.39.0
+```
+
+Runtime dependencies used by the app live in `amd/`:
+
+- `ryzenadj.exe`
+- `inpoutx64.dll`
+- `WinRing0x64.dll`
+- `WinRing0x64.sys`
+
+## Project Layout
 
 ```text
-dist\SystemMonitor.exe
+.
+|-- amd/                         # low-level AMD/EC runtime binaries
+|-- assets/                      # icon/image assets
+|-- docs/                        # user guide and images
+|-- dist-hotfix38/               # latest local test EXE build
+|-- scripts/Build-SystemMonitorExe.ps1
+|-- Launch-TdpDrainWidget.cmd
+|-- README.md
+`-- TdpDrainWidget.ps1           # main PowerShell/WPF app
 ```
 
-## Notes
+## Tester Feedback Needed
 
-- CPU power depends on hardware sensor support. Some PCs expose it correctly, some do not.
-- Battery data is only available on laptops / handhelds with a battery.
-- The widget tries to find `LibreHardwareMonitorLib.dll` from common installed locations on the machine.
-- `amd/` contains local runtime binaries used by this app (`ryzenadj`, `inpoutx64`) so it can run independently from MotionAssistant.
-- `SystemMonitor.config.json` is generated locally and is intentionally ignored from git.
+When testing on a GPD Win Mini or another handheld, please report:
 
-## Suggested GitHub Setup
+- Device model and CPU.
+- BIOS/firmware version if known.
+- Whether TDP changes apply correctly.
+- Whether fan modes actually spin the fan and report RPM.
+- Temperature behavior while gaming.
+- Screenshot of the widget if the UI clips or overlaps.
 
-- Commit the repo without `dist/` artifacts at first
-- Add screenshots later if you want a nicer README
-- Tag releases whenever you publish a new EXE build
+## Documentation
+
+- Vietnamese user guide: `docs/GUIDE_GPD_WIN_MINI_VI.md`
+- Current handoff/state for future agents: `agent team/HANDOFF_CURRENT.md`
+- GPD replacement roadmap: `agent team/ROADMAP_GPD_WIN_MINI_REPLACEMENT.md`
+
+## Safety Notes
+
+This app touches low-level performance and EC/fan controls. Use conservative settings first. If fan control behaves incorrectly, switch back to `Auto`, close the app, or reboot before heavy gaming.

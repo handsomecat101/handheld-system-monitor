@@ -116,6 +116,7 @@ $script:fanState = [PSCustomObject]@{
     LastApplyMode      = $null
     LastApplySucceeded = $false
     LastApplyStatus    = 'Idle'
+    LastKickstartAt    = [datetime]::MinValue
 }
 
 $script:fanEcConfig = [PSCustomObject]@{
@@ -124,7 +125,8 @@ $script:fanEcConfig = [PSCustomObject]@{
     RpmMsbAddr  = 0x0478
     RpmLsbAddr  = 0x0479
     PwmWriteAddr = 0x047A
-    LowPwm      = 1
+    OffPwm      = 1
+    LowPwm      = 92
     MediumPwm   = 140
     MaxPwm      = 244
 }
@@ -148,6 +150,37 @@ $script:refreshRateState = [PSCustomObject]@{
     LastAppliedHz      = $null
     LastApplySucceeded = $false
     LastApplyStatus    = 'Idle'
+}
+
+$script:tdpPowerProfileState = [PSCustomObject]@{
+    LastPowerLine      = $null
+    LastAutoApplyAt    = [datetime]::MinValue
+    LastAutoAppliedW   = $null
+}
+
+$script:processProfileState = [PSCustomObject]@{
+    CheckedAt               = [datetime]::MinValue
+    LastForegroundProcess   = $null
+    LastAppliedProfileName  = $null
+    LastAppliedAt           = [datetime]::MinValue
+    LastStatusMessage       = 'Process profile binding off'
+}
+
+$script:chargeLimitState = [PSCustomObject]@{
+    LastAlertedAt        = [datetime]::MinValue
+    AlertedForCurrentCycle = $false
+    LastPowerOnline      = $false
+    LastStatusMessage    = 'Charge limit off'
+}
+
+$script:gyroState = [PSCustomObject]@{
+    CheckedAt          = [datetime]::MinValue
+    IsAvailable        = $false
+    DeviceName         = $null
+    IsEnabled          = $false
+    LastMessage        = 'Gyro not detected'
+    LastApplyAt        = [datetime]::MinValue
+    LastApplySucceeded = $false
 }
 
 function Write-RuntimeLog {
@@ -409,11 +442,13 @@ function Get-DirectFanControllerSnapshot {
     $rpm = (($rpmMsb -shl 8) -bor $rpmLsb)
     $mode = if ($pwm -eq 0) {
         'Auto'
+    } elseif ($pwm -le 8) {
+        'Off'
     } elseif ($pwm -ge 220) {
         'Max'
     } elseif ($pwm -ge 130) {
         'Medium'
-    } elseif ($pwm -gt 0) {
+    } elseif ($pwm -gt 8) {
         'Low'
     } else {
         'Custom'
@@ -431,12 +466,13 @@ function Get-DirectFanControllerSnapshot {
 function Get-FanModeTargetPwm {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Low', 'Medium', 'Max', 'Auto')]
+        [ValidateSet('Off', 'Low', 'Medium', 'Max', 'Auto')]
         [string]$Mode
     )
 
     switch ($Mode) {
         'Auto' { return 0 }
+        'Off' { return [int]$script:fanEcConfig.OffPwm }
         'Low' { return [int]$script:fanEcConfig.LowPwm }
         'Medium' { return [int]$script:fanEcConfig.MediumPwm }
         'Max' { return [int]$script:fanEcConfig.MaxPwm }
@@ -446,7 +482,7 @@ function Get-FanModeTargetPwm {
 function Test-FanPwmMatchesMode {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Low', 'Medium', 'Max', 'Auto')]
+        [ValidateSet('Off', 'Low', 'Medium', 'Max', 'Auto')]
         [string]$Mode,
         [Nullable[int]]$PwmRaw
     )
@@ -457,7 +493,8 @@ function Test-FanPwmMatchesMode {
 
     switch ($Mode) {
         'Auto' { return $PwmRaw -eq 0 }
-        'Low' { return $PwmRaw -gt 0 -and $PwmRaw -le 8 }
+        'Off' { return $PwmRaw -le 8 }
+        'Low' { return [Math]::Abs($PwmRaw - [int]$script:fanEcConfig.LowPwm) -le 12 }
         'Medium' { return [Math]::Abs($PwmRaw - [int]$script:fanEcConfig.MediumPwm) -le 12 }
         'Max' { return $PwmRaw -ge 220 }
     }
@@ -466,7 +503,7 @@ function Test-FanPwmMatchesMode {
 function Set-DirectFanMode {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Low', 'Medium', 'Max', 'Auto')]
+        [ValidateSet('Off', 'Low', 'Medium', 'Max', 'Auto')]
         [string]$Mode
     )
 
@@ -505,6 +542,8 @@ function Set-DirectFanMode {
     $message = if ($success) {
         if ($Mode -eq 'Max' -and [int]$snapshot.Rpm -lt 4200) {
             'Fan mode: Max applied, spin-up in progress | ' + [int]$snapshot.Rpm + ' rpm (pwm ' + [int]$snapshot.PwmRaw + ')'
+        } elseif ($Mode -eq 'Off') {
+            'Fan mode: Off | ' + [int]$snapshot.Rpm + ' rpm (pwm ' + [int]$snapshot.PwmRaw + ')'
         } elseif ($Mode -eq 'Low') {
             'Fan mode: Low | ' + [int]$snapshot.Rpm + ' rpm (pwm ' + [int]$snapshot.PwmRaw + ')'
         } else {
@@ -524,7 +563,7 @@ function Set-DirectFanMode {
 function Enforce-FanManualHold {
     param(
         [switch]$Force,
-        [int]$MinIntervalMs = 1300
+        [int]$MinIntervalMs = 320
     )
 
     if (-not $script:fanState.ManualHoldEnabled) {
@@ -554,10 +593,26 @@ function Enforce-FanManualHold {
         return $snapshot
     }
 
-    if ([Math]::Abs([int]$snapshot.PwmRaw - $targetPwm) -gt 1) {
+    if (($null -eq $snapshot.PwmRaw) -or ([int]$snapshot.PwmRaw -eq 0) -or ([Math]::Abs([int]$snapshot.PwmRaw - $targetPwm) -gt 1)) {
         [void](Invoke-EcWriteByte -Offset $script:fanEcConfig.PwmWriteAddr -Value $targetPwm)
         Start-Sleep -Milliseconds 80
         $snapshot = Get-DirectFanControllerSnapshot
+    }
+
+    if ($script:fanState.ManualHoldEnabled -and $script:fanState.RequestedMode -ne 'Off' -and $script:fanState.RequestedMode -ne 'Auto') {
+        $rpmNow = if ($snapshot -and $null -ne $snapshot.Rpm) { [int]$snapshot.Rpm } else { 0 }
+        if ($rpmNow -le 0) {
+            $sinceKick = (Get-Date) - $script:fanState.LastKickstartAt
+            if ($sinceKick.TotalSeconds -ge 6) {
+                # Kickstart fan motor: brief max pulse, then return to target PWM.
+                [void](Invoke-EcWriteByte -Offset $script:fanEcConfig.PwmWriteAddr -Value ([int]$script:fanEcConfig.MaxPwm))
+                Start-Sleep -Milliseconds 1200
+                [void](Invoke-EcWriteByte -Offset $script:fanEcConfig.PwmWriteAddr -Value $targetPwm)
+                Start-Sleep -Milliseconds 120
+                $script:fanState.LastKickstartAt = Get-Date
+                $snapshot = Get-DirectFanControllerSnapshot
+            }
+        }
     }
 
     return $snapshot
@@ -1007,10 +1062,11 @@ function Get-OfflineDurationText {
     param([Nullable[datetime]]$OfflineSince)
 
     if ($null -eq $OfflineSince) {
-        return 'Offline'
+        return Translate-UiRuntimeText -Text 'Offline'
     }
 
-    return 'Offline ' + (Format-Duration -TotalSeconds ([int]((Get-Date) - $OfflineSince).TotalSeconds))
+    $prefix = if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Ngoại tuyến ' } else { 'Offline ' }
+    return $prefix + (Format-Duration -TotalSeconds ([int]((Get-Date) - $OfflineSince).TotalSeconds))
 }
 
 function Convert-ToConfigBoolean {
@@ -1055,6 +1111,19 @@ function Convert-ToConfigDouble {
     }
 
     return $Fallback
+}
+
+function Normalize-ChargeLimitPercent {
+    param(
+        $Value,
+        [int]$Fallback = 0
+    )
+
+    $raw = [int][Math]::Round((Convert-ToConfigDouble -Value $Value -Fallback $Fallback))
+    if ($raw -in @(80, 90, 95)) {
+        return $raw
+    }
+    return 0
 }
 
 function Get-StartupEnabled {
@@ -1124,17 +1193,230 @@ function Get-WidgetLaunchTarget {
     }
 }
 
+function New-DefaultAppProfile {
+    param(
+        [string]$Name = 'default'
+    )
+
+    return [PSCustomObject]@{
+        Name         = if ([string]::IsNullOrWhiteSpace($Name)) { 'default' } else { $Name.Trim() }
+        TdpAcW       = 12
+        TdpDcW       = 8
+        UnifyAcDcTdp = $false
+        FpsLimiter   = 0
+    }
+}
+
+function Normalize-AppProfile {
+    param(
+        $Profile,
+        [string]$FallbackName = 'default'
+    )
+
+    $fallback = New-DefaultAppProfile -Name $FallbackName
+    if (-not $Profile) {
+        return $fallback
+    }
+
+    $name = $fallback.Name
+    if ($Profile.PSObject.Properties.Name -contains 'Name' -and -not [string]::IsNullOrWhiteSpace([string]$Profile.Name)) {
+        $name = [string]$Profile.Name
+    }
+
+    $acW = $fallback.TdpAcW
+    if ($Profile.PSObject.Properties.Name -contains 'TdpAcW') {
+        $acW = [int][Math]::Round((Convert-ToConfigDouble -Value $Profile.TdpAcW -Fallback $acW))
+    }
+    $acW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, $acW))
+
+    $dcW = $fallback.TdpDcW
+    if ($Profile.PSObject.Properties.Name -contains 'TdpDcW') {
+        $dcW = [int][Math]::Round((Convert-ToConfigDouble -Value $Profile.TdpDcW -Fallback $dcW))
+    }
+    $dcW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, $dcW))
+
+    $unify = $fallback.UnifyAcDcTdp
+    if ($Profile.PSObject.Properties.Name -contains 'UnifyAcDcTdp') {
+        $unify = Convert-ToConfigBoolean -Value $Profile.UnifyAcDcTdp -Fallback $unify
+    }
+    if ($unify) {
+        $dcW = $acW
+    }
+
+    $fps = $fallback.FpsLimiter
+    if ($Profile.PSObject.Properties.Name -contains 'FpsLimiter') {
+        $fpsRaw = [int][Math]::Round((Convert-ToConfigDouble -Value $Profile.FpsLimiter -Fallback $fps))
+        $fps = if ($script:fpsLimiterLevels -contains $fpsRaw) { $fpsRaw } else { 0 }
+    }
+
+    return [PSCustomObject]@{
+        Name         = $name.Trim()
+        TdpAcW       = $acW
+        TdpDcW       = $dcW
+        UnifyAcDcTdp = $unify
+        FpsLimiter   = $fps
+    }
+}
+
+function Ensure-AppProfileStore {
+    param(
+        $Config
+    )
+
+    if (-not $Config) {
+        return
+    }
+
+    $profiles = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+
+    if ($Config.PSObject.Properties.Name -contains 'ProfileStore' -and $Config.ProfileStore) {
+        $index = 1
+        foreach ($rawProfile in @($Config.ProfileStore)) {
+            $normalized = Normalize-AppProfile -Profile $rawProfile -FallbackName ('profile-' + $index)
+            $nameKey = $normalized.Name.ToLowerInvariant()
+            if ($seen.ContainsKey($nameKey)) {
+                $index++
+                continue
+            }
+            $seen[$nameKey] = $true
+            [void]$profiles.Add($normalized)
+            $index++
+        }
+    }
+
+    if ($profiles.Count -eq 0) {
+        [void]$profiles.Add((New-DefaultAppProfile -Name 'default'))
+    }
+
+    $activeName = 'default'
+    if ($Config.PSObject.Properties.Name -contains 'ActiveProfileName' -and -not [string]::IsNullOrWhiteSpace([string]$Config.ActiveProfileName)) {
+        $activeName = [string]$Config.ActiveProfileName
+    }
+
+    $activeFound = $false
+    foreach ($profile in $profiles) {
+        if ([string]::Equals($profile.Name, $activeName, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $activeName = $profile.Name
+            $activeFound = $true
+            break
+        }
+    }
+    if (-not $activeFound) {
+        $activeName = [string]$profiles[0].Name
+    }
+
+    $Config.ProfileStore = @($profiles.ToArray())
+    $Config.ActiveProfileName = $activeName
+}
+
+function Normalize-ProcessExecutableName {
+    param(
+        [string]$Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        return $null
+    }
+
+    $normalized = $Name.Trim().ToLowerInvariant()
+    if ($normalized.Contains('\')) {
+        $normalized = [System.IO.Path]::GetFileName($normalized)
+    }
+    if ($normalized -notmatch '\.exe$') {
+        $normalized += '.exe'
+    }
+    return $normalized
+}
+
+function Ensure-ProcessProfileBindingStore {
+    param(
+        $Config
+    )
+
+    if (-not $Config) {
+        return
+    }
+
+    Ensure-AppProfileStore -Config $Config
+    $validProfileNames = @{}
+    foreach ($profile in @($Config.ProfileStore)) {
+        $validProfileNames[[string]$profile.Name] = $true
+    }
+
+    $bindings = @()
+    $seenProcessNames = @{}
+    if ($Config.PSObject.Properties.Name -contains 'ProcessProfileBindings' -and $Config.ProcessProfileBindings) {
+        foreach ($rawBinding in @($Config.ProcessProfileBindings)) {
+            if (-not $rawBinding) {
+                continue
+            }
+
+            $processName = $null
+            if ($rawBinding.PSObject.Properties.Name -contains 'ProcessName') {
+                $processName = Normalize-ProcessExecutableName -Name ([string]$rawBinding.ProcessName)
+            }
+            if ([string]::IsNullOrWhiteSpace($processName)) {
+                continue
+            }
+            if ($seenProcessNames.ContainsKey($processName)) {
+                continue
+            }
+
+            $profileName = $null
+            if ($rawBinding.PSObject.Properties.Name -contains 'ProfileName') {
+                $profileName = [string]$rawBinding.ProfileName
+            }
+            if ([string]::IsNullOrWhiteSpace($profileName) -or -not $validProfileNames.ContainsKey($profileName)) {
+                continue
+            }
+
+            $seenProcessNames[$processName] = $true
+            $bindings += [PSCustomObject]@{
+                ProcessName = $processName
+                ProfileName = $profileName
+            }
+        }
+    }
+
+    $Config.ProcessProfileBindings = @($bindings)
+    if (-not ($Config.PSObject.Properties.Name -contains 'EnableProcessProfileAutoApply')) {
+        $Config.EnableProcessProfileAutoApply = $true
+    } else {
+        $Config.EnableProcessProfileAutoApply = Convert-ToConfigBoolean -Value $Config.EnableProcessProfileAutoApply -Fallback $true
+    }
+}
+
 function Get-DefaultAppConfig {
     [PSCustomObject]@{
         Left             = 32.0
         Top              = 32.0
-        IsPinned         = $true
-        IsCompact        = $true
+        IsPinned         = $false
+        IsCompact        = $false
+        UiLanguage       = 'ENG'
         ShowTdpCustomPanel = $false
         TdpCustomW       = 6
+        TdpAcW           = 12
+        TdpDcW           = 8
+        UnifyAcDcTdp     = $false
         ShowModesPanel   = $false
         FpsLimiter       = 0
-        EnableEdgeSidebar = $true
+        ProfileStore     = @((New-DefaultAppProfile -Name 'default'))
+        ActiveProfileName = 'default'
+        ProcessProfileBindings = @()
+        EnableProcessProfileAutoApply = $true
+        ChargeLimitPercent = 0
+        EnableChargeLimitGuard = $true
+        GyroEnabled      = $false
+        ShowTdpBlock     = $true
+        ShowChargeBlock  = $true
+        ShowGyroBlock    = $true
+        ShowFanBlock     = $true
+        ShowFpsBlock     = $true
+        ShowCpuCard      = $true
+        ShowPowerFlowCard = $true
+        ShowBatteryCard  = $true
+        EnableEdgeSidebar = $false
         EdgeAutoHideSeconds = 4
         EnableInternetNotifications = $true
         StartWithWindows = (Get-StartupEnabled)
@@ -1160,12 +1442,27 @@ function Load-AppConfig {
             if ($loaded.PSObject.Properties.Name -contains 'IsCompact') {
                 $config.IsCompact = Convert-ToConfigBoolean -Value $loaded.IsCompact -Fallback $config.IsCompact
             }
+            if ($loaded.PSObject.Properties.Name -contains 'UiLanguage') {
+                $langRaw = [string]$loaded.UiLanguage
+                $config.UiLanguage = if ($langRaw -and $langRaw.Trim().ToUpperInvariant() -eq 'VIE') { 'VIE' } else { 'ENG' }
+            }
             if ($loaded.PSObject.Properties.Name -contains 'ShowTdpCustomPanel') {
                 $config.ShowTdpCustomPanel = Convert-ToConfigBoolean -Value $loaded.ShowTdpCustomPanel -Fallback $config.ShowTdpCustomPanel
             }
             if ($loaded.PSObject.Properties.Name -contains 'TdpCustomW') {
                 $customWRaw = Convert-ToConfigDouble -Value $loaded.TdpCustomW -Fallback $config.TdpCustomW
                 $config.TdpCustomW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, [int][Math]::Round($customWRaw)))
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'TdpAcW') {
+                $acWRaw = Convert-ToConfigDouble -Value $loaded.TdpAcW -Fallback $config.TdpAcW
+                $config.TdpAcW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, [int][Math]::Round($acWRaw)))
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'TdpDcW') {
+                $dcWRaw = Convert-ToConfigDouble -Value $loaded.TdpDcW -Fallback $config.TdpDcW
+                $config.TdpDcW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, [int][Math]::Round($dcWRaw)))
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'UnifyAcDcTdp') {
+                $config.UnifyAcDcTdp = Convert-ToConfigBoolean -Value $loaded.UnifyAcDcTdp -Fallback $config.UnifyAcDcTdp
             }
             if ($loaded.PSObject.Properties.Name -contains 'ShowModesPanel') {
                 $config.ShowModesPanel = Convert-ToConfigBoolean -Value $loaded.ShowModesPanel -Fallback $config.ShowModesPanel
@@ -1174,6 +1471,51 @@ function Load-AppConfig {
                 $fpsRaw = Convert-ToConfigDouble -Value $loaded.FpsLimiter -Fallback $config.FpsLimiter
                 $fpsRounded = [int][Math]::Round($fpsRaw)
                 $config.FpsLimiter = if ($script:fpsLimiterLevels -contains $fpsRounded) { $fpsRounded } else { 0 }
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'ProfileStore') {
+                $config.ProfileStore = @($loaded.ProfileStore)
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'ActiveProfileName') {
+                $config.ActiveProfileName = [string]$loaded.ActiveProfileName
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'ProcessProfileBindings') {
+                $config.ProcessProfileBindings = @($loaded.ProcessProfileBindings)
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'EnableProcessProfileAutoApply') {
+                $config.EnableProcessProfileAutoApply = Convert-ToConfigBoolean -Value $loaded.EnableProcessProfileAutoApply -Fallback $config.EnableProcessProfileAutoApply
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'ChargeLimitPercent') {
+                $config.ChargeLimitPercent = Normalize-ChargeLimitPercent -Value $loaded.ChargeLimitPercent -Fallback $config.ChargeLimitPercent
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'EnableChargeLimitGuard') {
+                $config.EnableChargeLimitGuard = Convert-ToConfigBoolean -Value $loaded.EnableChargeLimitGuard -Fallback $config.EnableChargeLimitGuard
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'GyroEnabled') {
+                $config.GyroEnabled = Convert-ToConfigBoolean -Value $loaded.GyroEnabled -Fallback $config.GyroEnabled
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'ShowTdpBlock') {
+                $config.ShowTdpBlock = Convert-ToConfigBoolean -Value $loaded.ShowTdpBlock -Fallback $config.ShowTdpBlock
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'ShowChargeBlock') {
+                $config.ShowChargeBlock = Convert-ToConfigBoolean -Value $loaded.ShowChargeBlock -Fallback $config.ShowChargeBlock
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'ShowGyroBlock') {
+                $config.ShowGyroBlock = Convert-ToConfigBoolean -Value $loaded.ShowGyroBlock -Fallback $config.ShowGyroBlock
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'ShowFanBlock') {
+                $config.ShowFanBlock = Convert-ToConfigBoolean -Value $loaded.ShowFanBlock -Fallback $config.ShowFanBlock
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'ShowFpsBlock') {
+                $config.ShowFpsBlock = Convert-ToConfigBoolean -Value $loaded.ShowFpsBlock -Fallback $config.ShowFpsBlock
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'ShowCpuCard') {
+                $config.ShowCpuCard = Convert-ToConfigBoolean -Value $loaded.ShowCpuCard -Fallback $config.ShowCpuCard
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'ShowPowerFlowCard') {
+                $config.ShowPowerFlowCard = Convert-ToConfigBoolean -Value $loaded.ShowPowerFlowCard -Fallback $config.ShowPowerFlowCard
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'ShowBatteryCard') {
+                $config.ShowBatteryCard = Convert-ToConfigBoolean -Value $loaded.ShowBatteryCard -Fallback $config.ShowBatteryCard
             }
             if ($loaded.PSObject.Properties.Name -contains 'EnableEdgeSidebar') {
                 $config.EnableEdgeSidebar = Convert-ToConfigBoolean -Value $loaded.EnableEdgeSidebar -Fallback $config.EnableEdgeSidebar
@@ -1193,7 +1535,155 @@ function Load-AppConfig {
     }
 
     $config.StartWithWindows = Get-StartupEnabled
+    $config.TdpAcW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, [int][Math]::Round([double]$config.TdpAcW)))
+    $config.TdpDcW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, [int][Math]::Round([double]$config.TdpDcW)))
+    if ([bool]$config.UnifyAcDcTdp) {
+        $config.TdpDcW = $config.TdpAcW
+    }
+    Ensure-AppProfileStore -Config $config
+    Ensure-ProcessProfileBindingStore -Config $config
+    $config.ChargeLimitPercent = Normalize-ChargeLimitPercent -Value $config.ChargeLimitPercent -Fallback 0
+    $config.EnableChargeLimitGuard = Convert-ToConfigBoolean -Value $config.EnableChargeLimitGuard -Fallback $true
+    $config.GyroEnabled = Convert-ToConfigBoolean -Value $config.GyroEnabled -Fallback $false
+    $config.UiLanguage = if ([string]$config.UiLanguage -eq 'VIE') { 'VIE' } else { 'ENG' }
+    $config.ShowTdpBlock = Convert-ToConfigBoolean -Value $config.ShowTdpBlock -Fallback $true
+    $config.ShowChargeBlock = Convert-ToConfigBoolean -Value $config.ShowChargeBlock -Fallback $true
+    $config.ShowGyroBlock = Convert-ToConfigBoolean -Value $config.ShowGyroBlock -Fallback $true
+    $config.ShowFanBlock = Convert-ToConfigBoolean -Value $config.ShowFanBlock -Fallback $true
+    $config.ShowFpsBlock = Convert-ToConfigBoolean -Value $config.ShowFpsBlock -Fallback $true
+    $config.ShowCpuCard = Convert-ToConfigBoolean -Value $config.ShowCpuCard -Fallback $true
+    $config.ShowPowerFlowCard = Convert-ToConfigBoolean -Value $config.ShowPowerFlowCard -Fallback $true
+    $config.ShowBatteryCard = Convert-ToConfigBoolean -Value $config.ShowBatteryCard -Fallback $true
     return $config
+}
+
+function Find-GyroDevice {
+    $keywords = @('gyro', 'gyroscope', 'imu', 'invensense', 'motion', 'accelerometer')
+    $gpdMarkers = @('vid_2f24&pid_0135', 'htix528', 'iltp7807')
+    $deviceName = $null
+    $gpdComputerPresent = $false
+    $gpdHidMatches = @()
+    try {
+        $pnpDevices = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue
+        foreach ($dev in @($pnpDevices)) {
+            if (-not $dev) { continue }
+            $haystack = @([string]$dev.FriendlyName, [string]$dev.Class, [string]$dev.InstanceId) -join ' '
+            if ([string]::IsNullOrWhiteSpace($haystack)) { continue }
+            $normalized = $haystack.ToLowerInvariant()
+            if ($normalized.Contains('gpd') -and ([string]$dev.Class).ToLowerInvariant() -eq 'computer') {
+                $gpdComputerPresent = $true
+            }
+            foreach ($marker in $gpdMarkers) {
+                if ($normalized.Contains($marker)) {
+                    $gpdHidMatches += if ($dev.FriendlyName) { [string]$dev.FriendlyName } else { [string]$dev.InstanceId }
+                    break
+                }
+            }
+            foreach ($key in $keywords) {
+                if ($normalized.Contains($key)) {
+                    $deviceName = if ($dev.FriendlyName) { [string]$dev.FriendlyName } else { [string]$dev.InstanceId }
+                    return [PSCustomObject]@{ IsAvailable = $true; DeviceName = $deviceName }
+                }
+            }
+        }
+    } catch {
+    }
+
+    try {
+        $cimDevices = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue
+        foreach ($dev in @($cimDevices)) {
+            if (-not $dev) { continue }
+            $haystack = @([string]$dev.Name, [string]$dev.Description, [string]$dev.PNPClass, [string]$dev.DeviceID) -join ' '
+            if ([string]::IsNullOrWhiteSpace($haystack)) { continue }
+            $normalized = $haystack.ToLowerInvariant()
+            if ($normalized.Contains('gpd g1617') -or $normalized.Contains('mfg_gpd')) {
+                $gpdComputerPresent = $true
+            }
+            foreach ($marker in $gpdMarkers) {
+                if ($normalized.Contains($marker)) {
+                    $gpdHidMatches += if ($dev.Name) { [string]$dev.Name } else { [string]$dev.DeviceID }
+                    break
+                }
+            }
+            foreach ($key in $keywords) {
+                if ($normalized.Contains($key)) {
+                    $deviceName = if ($dev.Name) { [string]$dev.Name } else { [string]$dev.DeviceID }
+                    return [PSCustomObject]@{ IsAvailable = $true; DeviceName = $deviceName }
+                }
+            }
+        }
+    } catch {
+    }
+
+    if ($gpdComputerPresent -and $gpdHidMatches.Count -gt 0) {
+        return [PSCustomObject]@{ IsAvailable = $true; DeviceName = 'Handheld Mode' }
+    }
+
+    return [PSCustomObject]@{ IsAvailable = $false; DeviceName = $null }
+}
+
+function Refresh-GyroState {
+    param(
+        [switch]$Force,
+        [int]$CacheSeconds = 15
+    )
+
+    $now = Get-Date
+    if (-not $Force -and (($now - $script:gyroState.CheckedAt).TotalSeconds -lt [Math]::Max($CacheSeconds, 1))) {
+        return $script:gyroState
+    }
+
+    $detected = Find-GyroDevice
+    $isEnabled = $false
+    if ($script:appConfig) {
+        $isEnabled = [bool]$script:appConfig.GyroEnabled
+    }
+    if (-not $detected.IsAvailable) {
+        $isEnabled = $false
+        if ($script:appConfig) {
+            $script:appConfig.GyroEnabled = $false
+        }
+    }
+
+    $message = if ($detected.IsAvailable) {
+        if ($isEnabled) { 'Gyro enabled' } else { 'Gyro ready (off)' }
+    } else {
+        'Gyro not detected'
+    }
+
+    $script:gyroState = [PSCustomObject]@{
+        CheckedAt          = $now
+        IsAvailable        = [bool]$detected.IsAvailable
+        DeviceName         = $detected.DeviceName
+        IsEnabled          = $isEnabled
+        LastMessage        = $message
+        LastApplyAt        = $script:gyroState.LastApplyAt
+        LastApplySucceeded = $script:gyroState.LastApplySucceeded
+    }
+    return $script:gyroState
+}
+
+function Invoke-GyroToggle {
+    param([bool]$Enabled)
+    $state = Refresh-GyroState -Force
+    if (-not $state.IsAvailable) {
+        $script:gyroState.LastApplyAt = Get-Date
+        $script:gyroState.LastApplySucceeded = $false
+        $script:gyroState.LastMessage = 'Gyro not detected'
+        if ($script:appConfig) {
+            $script:appConfig.GyroEnabled = $false
+        }
+        return [PSCustomObject]@{ Success = $false; Message = 'Gyro not detected' }
+    }
+
+    if ($script:appConfig) {
+        $script:appConfig.GyroEnabled = $Enabled
+    }
+    $script:gyroState.IsEnabled = $Enabled
+    $script:gyroState.LastApplyAt = Get-Date
+    $script:gyroState.LastApplySucceeded = $true
+    $script:gyroState.LastMessage = if ($Enabled) { 'Gyro enabled' } else { 'Gyro disabled' }
+    return [PSCustomObject]@{ Success = $true; Message = $script:gyroState.LastMessage }
 }
 
 function Save-AppConfig {
@@ -1202,6 +1692,8 @@ function Save-AppConfig {
     }
 
     try {
+        Ensure-AppProfileStore -Config $script:appConfig
+        Ensure-ProcessProfileBindingStore -Config $script:appConfig
         $script:appConfig.StartWithWindows = Get-StartupEnabled
         $script:appConfig | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:configPath -Encoding UTF8
     } catch {
@@ -1741,7 +2233,7 @@ function Set-CompactMode {
         $NamedElements.CompactButton.BorderBrush = if ($IsCompact) { New-Brush '#6675F0A2' } else { New-Brush '#2EFFFFFF' }
         $NamedElements.CompactButton.Foreground = New-Brush '#FFF5F7FB'
         $NamedElements.CompactButton.Opacity = if ($IsCompact) { 1.0 } else { 0.78 }
-        $NamedElements.CompactButton.ToolTip = if ($IsCompact) { 'Switch to full mode' } else { 'Switch to compact mode' }
+        $NamedElements.CompactButton.ToolTip = if ($IsCompact) { (Get-UiText -Key 'SwitchFullMode') } else { (Get-UiText -Key 'SwitchCompactMode') }
     }
 
     if ($script:appConfig) {
@@ -1750,6 +2242,99 @@ function Set-CompactMode {
 
     if ($script:edgeDockState.Enabled) {
         Set-EdgeDockPosition -Window $Window -Hidden $script:edgeDockState.Hidden
+    }
+}
+
+function Apply-UiLanguage {
+    param([hashtable]$NamedElements)
+    if (-not $NamedElements) { return }
+    if ($NamedElements.ContainsKey('SubtitleText') -and $NamedElements.SubtitleText) {
+        $NamedElements.SubtitleText.Text = Get-UiText -Key 'Subtitle'
+    }
+    if ($NamedElements.ContainsKey('SettingsButton') -and $NamedElements.SettingsButton) {
+        $NamedElements.SettingsButton.ToolTip = Get-UiText -Key 'OpenDisplaySettings'
+    }
+    if ($NamedElements.ContainsKey('PinButton') -and $NamedElements.PinButton) {
+        $NamedElements.PinButton.ToolTip = Get-UiText -Key 'PinOnTop'
+    }
+    if ($NamedElements.ContainsKey('CloseButton') -and $NamedElements.CloseButton) {
+        $NamedElements.CloseButton.ToolTip = Get-UiText -Key 'ExitApp'
+    }
+    if ($NamedElements.ContainsKey('TdpControlTitleText') -and $NamedElements.TdpControlTitleText) {
+        $NamedElements.TdpControlTitleText.Text = (Get-UiText -Key 'TdpControl').ToUpperInvariant()
+    }
+    if ($NamedElements.ContainsKey('ChargeLimitTitleText') -and $NamedElements.ChargeLimitTitleText) {
+        $NamedElements.ChargeLimitTitleText.Text = (Get-UiText -Key 'ChargeLimit').ToUpperInvariant()
+    }
+    if ($NamedElements.ContainsKey('GyroTitleText') -and $NamedElements.GyroTitleText) {
+        $NamedElements.GyroTitleText.Text = (Get-UiText -Key 'Gyro').ToUpperInvariant()
+    }
+    if ($NamedElements.ContainsKey('TdpCustomTitleText') -and $NamedElements.TdpCustomTitleText) {
+        $NamedElements.TdpCustomTitleText.Text = Get-UiText -Key 'CustomTdp'
+    }
+    if ($NamedElements.ContainsKey('FanProfileTitleText') -and $NamedElements.FanProfileTitleText) {
+        $NamedElements.FanProfileTitleText.Text = (Get-UiText -Key 'FanProfile').ToUpperInvariant()
+    }
+    if ($NamedElements.ContainsKey('FpsLimiterTitleText') -and $NamedElements.FpsLimiterTitleText) {
+        $NamedElements.FpsLimiterTitleText.Text = (Get-UiText -Key 'FpsLimiter').ToUpperInvariant()
+    }
+    if ($NamedElements.ContainsKey('RefreshRateTitleText') -and $NamedElements.RefreshRateTitleText) {
+        $NamedElements.RefreshRateTitleText.Text = Get-UiText -Key 'RefreshRate'
+    }
+    if ($NamedElements.ContainsKey('PowerFlowTitleText') -and $NamedElements.PowerFlowTitleText) {
+        $NamedElements.PowerFlowTitleText.Text = Get-UiText -Key 'PowerFlow'
+    }
+    if ($NamedElements.ContainsKey('BatteryEtaTitleText') -and $NamedElements.BatteryEtaTitleText) {
+        $NamedElements.BatteryEtaTitleText.Text = Get-UiText -Key 'BatteryEta'
+    }
+    if ($NamedElements.ContainsKey('TdpCustomToggleButton') -and $NamedElements.TdpCustomToggleButton) {
+        $NamedElements.TdpCustomToggleButton.Content = if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Tùy chỉnh' } else { 'Custom' }
+    }
+    if ($NamedElements.ContainsKey('TdpApplyActiveProfileButton') -and $NamedElements.TdpApplyActiveProfileButton) {
+        if ($NamedElements.TdpApplyActiveProfileButton.Content -eq 'Apply') {
+            $NamedElements.TdpApplyActiveProfileButton.Content = if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Áp dụng' } else { 'Apply' }
+        }
+    }
+    foreach ($btn in @('ChargeLimitOffButton','FpsOffButton','FanOffButton','GyroOffButton')) {
+        if ($NamedElements.ContainsKey($btn) -and $NamedElements[$btn]) { $NamedElements[$btn].Content = Get-UiText -Key 'FanOff' }
+    }
+    if ($NamedElements.ContainsKey('GyroOnButton') -and $NamedElements.GyroOnButton) { $NamedElements.GyroOnButton.Content = Get-UiText -Key 'GyroOn' }
+    if ($NamedElements.ContainsKey('FanLowButton') -and $NamedElements.FanLowButton) { $NamedElements.FanLowButton.Content = Get-UiText -Key 'FanLow' }
+    if ($NamedElements.ContainsKey('FanMediumButton') -and $NamedElements.FanMediumButton) { $NamedElements.FanMediumButton.Content = Get-UiText -Key 'FanMedium' }
+    if ($NamedElements.ContainsKey('FanMaxButton') -and $NamedElements.FanMaxButton) { $NamedElements.FanMaxButton.Content = Get-UiText -Key 'FanMax' }
+    if ($NamedElements.ContainsKey('FanAutoButton') -and $NamedElements.FanAutoButton) { $NamedElements.FanAutoButton.Content = Get-UiText -Key 'FanAuto' }
+    if ($NamedElements.ContainsKey('LanguageButton') -and $NamedElements.LanguageButton) {
+        $NamedElements.LanguageButton.Content = if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { Get-UiText -Key 'LanguageButtonVie' } else { Get-UiText -Key 'LanguageButtonEng' }
+        $NamedElements.LanguageButton.ToolTip = Get-UiText -Key 'SwitchLanguage'
+    }
+    if ($NamedElements.ContainsKey('CompactButton') -and $NamedElements.CompactButton -and $script:appConfig) {
+        $NamedElements.CompactButton.ToolTip = if ([bool]$script:appConfig.IsCompact) { (Get-UiText -Key 'SwitchFullMode') } else { (Get-UiText -Key 'SwitchCompactMode') }
+    }
+}
+
+function Reorder-TdpCustomPanel {
+    param([hashtable]$NamedElements)
+    if (-not $NamedElements) { return }
+    if (-not $NamedElements.ContainsKey('TdpControlPanel') -or -not $NamedElements.TdpControlPanel) { return }
+    if (-not $NamedElements.ContainsKey('TdpCustomPanel') -or -not $NamedElements.TdpCustomPanel) { return }
+    if (-not $NamedElements.ContainsKey('TdpStatusText') -or -not $NamedElements.TdpStatusText) { return }
+
+    try {
+        $stack = $NamedElements.TdpControlPanel.Child
+        if (-not ($stack -is [System.Windows.Controls.StackPanel])) { return }
+        $customPanel = $NamedElements.TdpCustomPanel
+        $statusText = $NamedElements.TdpStatusText
+        if ($stack.Children.Contains($customPanel)) {
+            $stack.Children.Remove($customPanel)
+        }
+        $statusIndex = $stack.Children.IndexOf($statusText)
+        if ($statusIndex -lt 0) {
+            $stack.Children.Add($customPanel) | Out-Null
+        } else {
+            $insertIndex = [Math]::Min($statusIndex + 1, $stack.Children.Count)
+            $stack.Children.Insert($insertIndex, $customPanel)
+        }
+    } catch {
     }
 }
 
@@ -2165,6 +2750,84 @@ function Update-InternetAlertState {
 
     $script:internetAlertMode = 'none'
     Set-InternetAlertVisual -NamedElements $NamedElements -Mode 'none'
+}
+
+function Get-ChargeLimitStatusText {
+    param(
+        $Snapshot
+    )
+
+    if (-not $script:appConfig -or -not [bool]$script:appConfig.EnableChargeLimitGuard) {
+        return 'Charge guard disabled'
+    }
+
+    $limit = Normalize-ChargeLimitPercent -Value $script:appConfig.ChargeLimitPercent -Fallback 0
+    if ($limit -le 0) {
+        return 'Charge limit off'
+    }
+
+    if ($Snapshot -and $null -ne $Snapshot.BatteryLevel) {
+        return ('Charge guard: {0}% (now {1:N0}%)' -f $limit, $Snapshot.BatteryLevel)
+    }
+
+    return ('Charge guard: {0}%' -f $limit)
+}
+
+function Update-ChargeLimitGuard {
+    param(
+        $Snapshot,
+        $NotifyIcon
+    )
+
+    if (-not $script:appConfig) {
+        return
+    }
+
+    $limit = Normalize-ChargeLimitPercent -Value $script:appConfig.ChargeLimitPercent -Fallback 0
+    $enabled = [bool]$script:appConfig.EnableChargeLimitGuard -and $limit -gt 0
+    $isOnline = ($Snapshot -and ([string]$Snapshot.PowerLineStatus -eq 'Online'))
+    $batteryLevel = if ($Snapshot -and $null -ne $Snapshot.BatteryLevel) { [double]$Snapshot.BatteryLevel } else { $null }
+
+    if (-not $enabled) {
+        $script:chargeLimitState.AlertedForCurrentCycle = $false
+        $script:chargeLimitState.LastPowerOnline = $isOnline
+        $script:chargeLimitState.LastStatusMessage = if ([bool]$script:appConfig.EnableChargeLimitGuard) { 'Charge limit off' } else { 'Charge guard disabled' }
+        return
+    }
+
+    if (-not $isOnline) {
+        $script:chargeLimitState.AlertedForCurrentCycle = $false
+        $script:chargeLimitState.LastPowerOnline = $false
+        $script:chargeLimitState.LastStatusMessage = ('Charge guard armed at {0}% (on battery)' -f $limit)
+        return
+    }
+
+    if ($null -eq $batteryLevel) {
+        $script:chargeLimitState.LastStatusMessage = ('Charge guard {0}% (battery level unavailable)' -f $limit)
+        return
+    }
+
+    if ($batteryLevel -le ($limit - 2)) {
+        $script:chargeLimitState.AlertedForCurrentCycle = $false
+    }
+
+    if ($batteryLevel -ge $limit) {
+        $script:chargeLimitState.LastStatusMessage = ('Reached {0}% while charging - unplug charger to protect battery' -f $limit)
+        if (-not $script:chargeLimitState.AlertedForCurrentCycle) {
+            try {
+                if ($NotifyIcon) {
+                    $NotifyIcon.ShowBalloonTip(5000, 'System Monitor', ('Battery reached {0}%. Please unplug charger.' -f $limit), [System.Windows.Forms.ToolTipIcon]::Info)
+                }
+            } catch {
+            }
+            $script:chargeLimitState.AlertedForCurrentCycle = $true
+            $script:chargeLimitState.LastAlertedAt = Get-Date
+        }
+    } else {
+        $script:chargeLimitState.LastStatusMessage = ('Charging... guard at {0}% (now {1:N0}%)' -f $limit, $batteryLevel)
+    }
+
+    $script:chargeLimitState.LastPowerOnline = $true
 }
 
 function Resolve-RyzenAdjPath {
@@ -2627,6 +3290,7 @@ function Refresh-FanState {
         LastApplyMode      = $script:fanState.LastApplyMode
         LastApplySucceeded = $script:fanState.LastApplySucceeded
         LastApplyStatus    = if ($script:fanState.LastApplyStatus) { $script:fanState.LastApplyStatus } else { 'Idle' }
+        LastKickstartAt    = $script:fanState.LastKickstartAt
     }
 
     return $script:fanState
@@ -2635,7 +3299,7 @@ function Refresh-FanState {
 function Invoke-FanModePreset {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Low', 'Medium', 'Max', 'Auto')]
+        [ValidateSet('Off', 'Low', 'Medium', 'Max', 'Auto')]
         [string]$Mode
     )
 
@@ -2646,6 +3310,16 @@ function Invoke-FanModePreset {
     $script:fanState.LastMessage = 'Applying fan mode ' + $Mode + '...'
 
     $targetPwm = Get-FanModeTargetPwm -Mode $Mode
+    # Keep requested mode immediately so EC auto-reset cannot drop fan to PWM 0
+    # when the first write/read check is transiently unstable.
+    $script:fanState.RequestedMode = $Mode
+    $script:fanState.RequestedPwm = $targetPwm
+    $script:fanState.ManualHoldEnabled = $Mode -ne 'Auto'
+    $script:fanState.LastEnforceAt = [datetime]::MinValue
+    if ($script:fanState.ManualHoldEnabled) {
+        [void](Enforce-FanManualHold -Force)
+    }
+
     $apply = Set-DirectFanMode -Mode $Mode
     $success = [bool]$apply.Success
     $message = if ($apply.Message) { $apply.Message } else { if ($success) { 'Fan mode: ' + $Mode } else { 'Fan mode apply failed' } }
@@ -2655,14 +3329,9 @@ function Invoke-FanModePreset {
     $script:fanState.LastApplyMode = $Mode
     $script:fanState.LastApplyAt = Get-Date
     $script:fanState.LastMessage = $message
-    if ($success) {
-        $script:fanState.RequestedMode = $Mode
-        $script:fanState.RequestedPwm = $targetPwm
-        $script:fanState.ManualHoldEnabled = $Mode -ne 'Auto'
-        $script:fanState.LastEnforceAt = [datetime]::MinValue
-        if ($script:fanState.ManualHoldEnabled) {
-            [void](Enforce-FanManualHold -Force)
-        }
+    if (-not $success -and $script:fanState.ManualHoldEnabled) {
+        # Preserve manual hold and let periodic enforcement keep writing target PWM.
+        $message = $message + ' (manual hold retry active)'
     }
 
     if ($apply.Snapshot) {
@@ -2670,12 +3339,288 @@ function Invoke-FanModePreset {
         $script:fanState.CurrentPwm = $apply.Snapshot.PwmRaw
         $script:fanState.Mode = if ($success) { $Mode } else { $apply.Snapshot.Mode }
         $script:fanState.IsAvailable = $true
+        if ($Mode -ne 'Off' -and $Mode -ne 'Auto' -and (($null -eq $apply.Snapshot.Rpm) -or ([int]$apply.Snapshot.Rpm -le 0))) {
+            $script:fanState.LastKickstartAt = [datetime]::MinValue
+            [void](Enforce-FanManualHold -Force)
+        }
     }
 
     return [PSCustomObject]@{
         Success = $success
         Message = $message
     }
+}
+
+function Get-IsAcPowerSource {
+    param($Snapshot)
+
+    if ($null -eq $Snapshot -or -not ($Snapshot.PSObject.Properties.Name -contains 'PowerLineStatus')) {
+        return $false
+    }
+
+    return ([string]$Snapshot.PowerLineStatus) -eq 'Online'
+}
+
+function Get-TdpTargetForPowerState {
+    param(
+        $Snapshot,
+        [ValidateSet('Auto', 'AC', 'DC')]
+        [string]$ProfileMode = 'Auto'
+    )
+
+    if (-not $script:appConfig) {
+        return $null
+    }
+
+    $acW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, [int]$script:appConfig.TdpAcW))
+    $dcW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, [int]$script:appConfig.TdpDcW))
+
+    if ([bool]$script:appConfig.UnifyAcDcTdp) {
+        return $acW
+    }
+
+    switch ($ProfileMode) {
+        'AC' { return $acW }
+        'DC' { return $dcW }
+        default {
+            if (Get-IsAcPowerSource -Snapshot $Snapshot) {
+                return $acW
+            }
+            return $dcW
+        }
+    }
+}
+
+function Set-TdpProfileValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$Watts,
+        $Snapshot,
+        [ValidateSet('Auto', 'AC', 'DC')]
+        [string]$ProfileMode = 'Auto'
+    )
+
+    if (-not $script:appConfig) {
+        return
+    }
+
+    $clampedW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, [int]$Watts))
+    $mode = $ProfileMode
+    if ($mode -eq 'Auto') {
+        $mode = if ((Get-IsAcPowerSource -Snapshot $Snapshot)) { 'AC' } else { 'DC' }
+    }
+
+    if ($mode -eq 'AC') {
+        $script:appConfig.TdpAcW = $clampedW
+        if ([bool]$script:appConfig.UnifyAcDcTdp) {
+            $script:appConfig.TdpDcW = $clampedW
+        }
+    } else {
+        $script:appConfig.TdpDcW = $clampedW
+    }
+}
+
+function Get-AppProfileByName {
+    param(
+        [string]$Name
+    )
+
+    if (-not $script:appConfig -or -not $script:appConfig.ProfileStore) {
+        return $null
+    }
+
+    foreach ($profile in @($script:appConfig.ProfileStore)) {
+        if ([string]::Equals([string]$profile.Name, $Name, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $profile
+        }
+    }
+
+    return $null
+}
+
+function Save-CurrentConfigToProfile {
+    param(
+        [string]$ProfileName
+    )
+
+    if (-not $script:appConfig -or [string]::IsNullOrWhiteSpace($ProfileName)) {
+        return $false
+    }
+
+    Ensure-AppProfileStore -Config $script:appConfig
+    $target = Get-AppProfileByName -Name $ProfileName
+    if (-not $target) {
+        return $false
+    }
+
+    $target.TdpAcW = [int]$script:appConfig.TdpAcW
+    $target.TdpDcW = [int]$script:appConfig.TdpDcW
+    $target.UnifyAcDcTdp = [bool]$script:appConfig.UnifyAcDcTdp
+    $target.FpsLimiter = [int]$script:appConfig.FpsLimiter
+    $script:appConfig.ActiveProfileName = [string]$target.Name
+    return $true
+}
+
+function Load-ProfileToCurrentConfig {
+    param(
+        [string]$ProfileName
+    )
+
+    if (-not $script:appConfig -or [string]::IsNullOrWhiteSpace($ProfileName)) {
+        return $false
+    }
+
+    Ensure-AppProfileStore -Config $script:appConfig
+    $profile = Get-AppProfileByName -Name $ProfileName
+    if (-not $profile) {
+        return $false
+    }
+
+    $normalized = Normalize-AppProfile -Profile $profile -FallbackName $ProfileName
+    $script:appConfig.TdpAcW = [int]$normalized.TdpAcW
+    $script:appConfig.TdpDcW = [int]$normalized.TdpDcW
+    $script:appConfig.UnifyAcDcTdp = [bool]$normalized.UnifyAcDcTdp
+    $script:appConfig.FpsLimiter = [int]$normalized.FpsLimiter
+    $script:appConfig.ActiveProfileName = [string]$normalized.Name
+    return $true
+}
+
+function New-AppProfileFromCurrentConfig {
+    if (-not $script:appConfig) {
+        return $null
+    }
+
+    Ensure-AppProfileStore -Config $script:appConfig
+    $baseName = 'profile'
+    $nextIndex = 1
+    while ($true) {
+        $candidate = ('{0}-{1}' -f $baseName, $nextIndex)
+        if (-not (Get-AppProfileByName -Name $candidate)) {
+            $newProfile = Normalize-AppProfile -Profile ([PSCustomObject]@{
+                    Name         = $candidate
+                    TdpAcW       = $script:appConfig.TdpAcW
+                    TdpDcW       = $script:appConfig.TdpDcW
+                    UnifyAcDcTdp = $script:appConfig.UnifyAcDcTdp
+                    FpsLimiter   = $script:appConfig.FpsLimiter
+                }) -FallbackName $candidate
+            $script:appConfig.ProfileStore = @($script:appConfig.ProfileStore) + @($newProfile)
+            $script:appConfig.ActiveProfileName = $newProfile.Name
+            return $newProfile
+        }
+        $nextIndex++
+        if ($nextIndex -gt 999) {
+            return $null
+        }
+    }
+}
+
+function Remove-AppProfileByName {
+    param(
+        [string]$ProfileName
+    )
+
+    if (-not $script:appConfig -or [string]::IsNullOrWhiteSpace($ProfileName)) {
+        return $false
+    }
+
+    Ensure-AppProfileStore -Config $script:appConfig
+    if ($script:appConfig.ProfileStore.Count -le 1) {
+        return $false
+    }
+
+    $filtered = @()
+    $removed = $false
+    foreach ($profile in @($script:appConfig.ProfileStore)) {
+        if ([string]::Equals([string]$profile.Name, $ProfileName, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $removed = $true
+            continue
+        }
+        $filtered += $profile
+    }
+
+    if (-not $removed) {
+        return $false
+    }
+
+    $script:appConfig.ProfileStore = @($filtered)
+    Ensure-AppProfileStore -Config $script:appConfig
+    if ([string]::Equals($script:appConfig.ActiveProfileName, $ProfileName, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $script:appConfig.ActiveProfileName = [string]$script:appConfig.ProfileStore[0].Name
+        [void](Load-ProfileToCurrentConfig -ProfileName $script:appConfig.ActiveProfileName)
+    }
+    return $true
+}
+
+function Reset-ProfileToDefaultValues {
+    param(
+        [string]$ProfileName
+    )
+
+    if (-not $script:appConfig -or [string]::IsNullOrWhiteSpace($ProfileName)) {
+        return $false
+    }
+
+    $target = Get-AppProfileByName -Name $ProfileName
+    if (-not $target) {
+        return $false
+    }
+
+    $defaultProfile = New-DefaultAppProfile -Name $target.Name
+    $target.TdpAcW = $defaultProfile.TdpAcW
+    $target.TdpDcW = $defaultProfile.TdpDcW
+    $target.UnifyAcDcTdp = $defaultProfile.UnifyAcDcTdp
+    $target.FpsLimiter = $defaultProfile.FpsLimiter
+    if ([string]::Equals($script:appConfig.ActiveProfileName, $target.Name, [System.StringComparison]::OrdinalIgnoreCase)) {
+        [void](Load-ProfileToCurrentConfig -ProfileName $target.Name)
+    }
+    return $true
+}
+
+function Try-AutoApplyTdpProfileOnPowerChange {
+    param(
+        $Snapshot
+    )
+
+    if (-not $Snapshot -or -not $script:appConfig) {
+        return $null
+    }
+
+    $powerLine = [string]$Snapshot.PowerLineStatus
+    if ([string]::IsNullOrWhiteSpace($powerLine)) {
+        return $null
+    }
+
+    $last = $script:tdpPowerProfileState.LastPowerLine
+    $script:tdpPowerProfileState.LastPowerLine = $powerLine
+
+    if ([string]::IsNullOrWhiteSpace($last) -or $last -eq $powerLine) {
+        return $null
+    }
+
+    $now = Get-Date
+    if (($now - $script:tdpPowerProfileState.LastAutoApplyAt).TotalSeconds -lt 2) {
+        return $null
+    }
+
+    $targetW = Get-TdpTargetForPowerState -Snapshot $Snapshot -ProfileMode 'Auto'
+    if ($null -eq $targetW) {
+        return $null
+    }
+
+    $state = Refresh-PerformanceState -Force
+    if ($null -ne $state.CurrentLimitW -and [Math]::Abs($state.CurrentLimitW - $targetW) -le 0.6) {
+        return $null
+    }
+
+    $result = Invoke-TdpPreset -Watts $targetW
+    if ($result.Success) {
+        $script:tdpPowerProfileState.LastAutoApplyAt = $now
+        $script:tdpPowerProfileState.LastAutoAppliedW = $targetW
+        $modeLabel = if ((Get-IsAcPowerSource -Snapshot $Snapshot)) { 'AC' } else { 'DC' }
+        $script:performanceState.LastMessage = 'Auto TDP profile ' + $modeLabel + ': ' + $targetW + 'W'
+    }
+
+    return $result
 }
 
 function Invoke-TdpPreset {
@@ -2854,13 +3799,50 @@ function Set-FpsPresetVisual {
     }
 }
 
+function Set-ChargeLimitPresetVisual {
+    param(
+        [hashtable]$NamedElements,
+        [int]$ChargeLimitPercent,
+        [bool]$GuardEnabled
+    )
+
+    $presets = @(
+        @{ Name = 'ChargeLimitOffButton'; Value = 0 },
+        @{ Name = 'ChargeLimit80Button'; Value = 80 },
+        @{ Name = 'ChargeLimit90Button'; Value = 90 },
+        @{ Name = 'ChargeLimit95Button'; Value = 95 }
+    )
+
+    foreach ($preset in $presets) {
+        if (-not $NamedElements.ContainsKey($preset.Name)) {
+            continue
+        }
+
+        $button = $NamedElements[$preset.Name]
+        if (-not $button) {
+            continue
+        }
+
+        $value = [int]$preset.Value
+        $isActive = if ($value -eq 0) {
+            (-not $GuardEnabled) -or ($ChargeLimitPercent -le 0)
+        } else {
+            $GuardEnabled -and ($ChargeLimitPercent -eq $value)
+        }
+
+        $button.Background = if ($isActive) { New-Brush '#3358D68D' } else { New-Brush '#14FFFFFF' }
+        $button.BorderBrush = if ($isActive) { New-Brush '#6676F0A5' } else { New-Brush '#2DFFFFFF' }
+        $button.Foreground = if ($isActive) { New-Brush '#FFF6FFF9' } else { New-Brush '#FFDDECF9' }
+    }
+}
+
 function Set-FanPresetVisual {
     param(
         [hashtable]$NamedElements,
         [string]$Mode
     )
 
-    foreach ($preset in @('Low', 'Medium', 'Max', 'Auto')) {
+    foreach ($preset in @('Off', 'Low', 'Medium', 'Max', 'Auto')) {
         $buttonName = 'Fan{0}Button' -f $preset
         if (-not $NamedElements.ContainsKey($buttonName)) {
             continue
@@ -2909,6 +3891,28 @@ function Set-RefreshPresetVisual {
     }
 }
 
+function Set-GyroToggleVisual {
+    param(
+        [hashtable]$NamedElements,
+        [bool]$IsEnabled,
+        [bool]$IsAvailable
+    )
+
+    foreach ($pair in @(
+        @{ Name = 'GyroOffButton'; Active = (-not $IsEnabled) },
+        @{ Name = 'GyroOnButton'; Active = $IsEnabled }
+    )) {
+        if (-not $NamedElements.ContainsKey($pair.Name)) { continue }
+        $button = $NamedElements[$pair.Name]
+        if (-not $button) { continue }
+        $button.IsEnabled = $IsAvailable
+        $button.Opacity = if ($IsAvailable) { 1.0 } else { 0.45 }
+        $button.Background = if ($pair.Active -and $IsAvailable) { New-Brush '#3347B7FF' } else { New-Brush '#14FFFFFF' }
+        $button.BorderBrush = if ($pair.Active -and $IsAvailable) { New-Brush '#6689D8FF' } else { New-Brush '#2DFFFFFF' }
+        $button.Foreground = if ($IsAvailable) { New-Brush '#FFF7FCFF' } else { New-Brush '#AAC8D9E5' }
+    }
+}
+
 function Update-TdpControlsUi {
     param(
         [hashtable]$NamedElements,
@@ -2918,21 +3922,202 @@ function Update-TdpControlsUi {
     $tdpState = $script:performanceState
     $fanState = $script:fanState
     $refreshState = $script:refreshRateState
+    $gyroState = $script:gyroState
     $fpsLimiter = if ($script:appConfig) { [int]$script:appConfig.FpsLimiter } else { 0 }
 
+    $limitLabel = if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Mức' } else { 'Limit' }
     $NamedElements.TdpCurrentText.Text = if ($null -ne $tdpState.CurrentLimitW) {
-        'Limit {0:N1}W' -f $tdpState.CurrentLimitW
+        '{0} {1:N1}W' -f $limitLabel, $tdpState.CurrentLimitW
     } else {
-        'Limit --'
+        '{0} --' -f $limitLabel
     }
 
-    $NamedElements.TdpStatusText.Text = if ($tdpState.LastMessage) { $tdpState.LastMessage } else { 'TDP status unavailable' }
+    $tdpStatusRaw = if ($tdpState.LastMessage) { $tdpState.LastMessage } else { 'TDP status unavailable' }
+    $NamedElements.TdpStatusText.Text = Translate-UiRuntimeText -Text $tdpStatusRaw
     $NamedElements.TdpStatusText.Foreground = if ($tdpState.LastApplySucceeded -and ($tdpState.LastMessage -like 'Applied*')) {
         New-Brush '#FF8EE7B3'
     } elseif (-not $tdpState.IsAvailable) {
         New-Brush '#FFFFB2B2'
     } else {
         New-Brush '#CBEAF5FF'
+    }
+
+    # Temporarily hide all profile-related UI blocks.
+    if ($NamedElements.ContainsKey('TdpPowerProfilePanel') -and $NamedElements.TdpPowerProfilePanel) {
+        $NamedElements.TdpPowerProfilePanel.Visibility = 'Collapsed'
+    }
+    if ($NamedElements.ContainsKey('UnifyAcDcTdpCheckBox') -and $NamedElements.UnifyAcDcTdpCheckBox) {
+        $NamedElements.UnifyAcDcTdpCheckBox.Visibility = 'Collapsed'
+    }
+    if ($NamedElements.ContainsKey('TdpPowerDetailGrid') -and $NamedElements.TdpPowerDetailGrid) {
+        $NamedElements.TdpPowerDetailGrid.Visibility = 'Collapsed'
+    }
+    if ($NamedElements.ContainsKey('ProfileManagerPanel') -and $NamedElements.ProfileManagerPanel) {
+        $NamedElements.ProfileManagerPanel.Visibility = 'Collapsed'
+    }
+
+    if ($script:appConfig) {
+        if ($NamedElements.ContainsKey('TdpControlPanel') -and $NamedElements.TdpControlPanel) {
+            $NamedElements.TdpControlPanel.Visibility = if ([bool]$script:appConfig.ShowTdpBlock) { 'Visible' } else { 'Collapsed' }
+        }
+        if ($NamedElements.ContainsKey('ChargeLimitPanel') -and $NamedElements.ChargeLimitPanel) {
+            $NamedElements.ChargeLimitPanel.Visibility = 'Collapsed'
+        }
+        if ($NamedElements.ContainsKey('ChargeLimitStatusText') -and $NamedElements.ChargeLimitStatusText) {
+            $NamedElements.ChargeLimitStatusText.Visibility = 'Collapsed'
+        }
+        if ($NamedElements.ContainsKey('GyroSectionSeparator') -and $NamedElements.GyroSectionSeparator) {
+            $NamedElements.GyroSectionSeparator.Visibility = if ([bool]$script:appConfig.ShowGyroBlock) { 'Visible' } else { 'Collapsed' }
+        }
+        if ($NamedElements.ContainsKey('GyroPanel') -and $NamedElements.GyroPanel) {
+            $NamedElements.GyroPanel.Visibility = if ([bool]$script:appConfig.ShowGyroBlock) { 'Visible' } else { 'Collapsed' }
+        }
+        if ($NamedElements.ContainsKey('GyroStatusText') -and $NamedElements.GyroStatusText) {
+            $NamedElements.GyroStatusText.Visibility = if ([bool]$script:appConfig.ShowGyroBlock) { 'Visible' } else { 'Collapsed' }
+        }
+        if ($NamedElements.ContainsKey('FanSectionSeparator') -and $NamedElements.FanSectionSeparator) {
+            $NamedElements.FanSectionSeparator.Visibility = if ([bool]$script:appConfig.ShowFanBlock) { 'Visible' } else { 'Collapsed' }
+        }
+        if ($NamedElements.ContainsKey('FanPanelHeaderGrid') -and $NamedElements.FanPanelHeaderGrid) {
+            $NamedElements.FanPanelHeaderGrid.Visibility = if ([bool]$script:appConfig.ShowFanBlock) { 'Visible' } else { 'Collapsed' }
+        }
+        if ($NamedElements.ContainsKey('FanStatusText') -and $NamedElements.FanStatusText) {
+            $NamedElements.FanStatusText.Visibility = if ([bool]$script:appConfig.ShowFanBlock) { 'Visible' } else { 'Collapsed' }
+        }
+        if ($NamedElements.ContainsKey('ModesPanel') -and $NamedElements.ModesPanel) {
+            if ([bool]$script:appConfig.ShowFpsBlock) {
+                $showModes = [bool]$script:appConfig.ShowModesPanel
+                Set-ModesPanelState -NamedElements $NamedElements -IsVisible $showModes
+            } else {
+                $NamedElements.ModesPanel.Visibility = 'Collapsed'
+            }
+        }
+        if ($NamedElements.ContainsKey('CpuPowerCard') -and $NamedElements.CpuPowerCard) {
+            $NamedElements.CpuPowerCard.Visibility = if ([bool]$script:appConfig.ShowCpuCard) { 'Visible' } else { 'Collapsed' }
+        }
+        if ($NamedElements.ContainsKey('PowerFlowCard') -and $NamedElements.PowerFlowCard) {
+            $NamedElements.PowerFlowCard.Visibility = if ([bool]$script:appConfig.ShowPowerFlowCard) { 'Visible' } else { 'Collapsed' }
+        }
+        if ($NamedElements.ContainsKey('BatteryEtaCard') -and $NamedElements.BatteryEtaCard) {
+            $NamedElements.BatteryEtaCard.Visibility = if ([bool]$script:appConfig.ShowBatteryCard) { 'Visible' } else { 'Collapsed' }
+        }
+    }
+
+    if ($NamedElements.ContainsKey('UnifyAcDcTdpCheckBox') -and $NamedElements.UnifyAcDcTdpCheckBox -and $script:appConfig) {
+        $NamedElements.UnifyAcDcTdpCheckBox.IsChecked = [bool]$script:appConfig.UnifyAcDcTdp
+    }
+
+    if ($NamedElements.ContainsKey('TdpAcSlider') -and $NamedElements.TdpAcSlider -and $script:appConfig) {
+        $NamedElements.TdpAcSlider.Minimum = [double]$script:tdpCustomRange.MinW
+        $NamedElements.TdpAcSlider.Maximum = [double]$script:tdpCustomRange.MaxW
+        $desiredAc = [double]$script:appConfig.TdpAcW
+        if ([Math]::Abs([double]$NamedElements.TdpAcSlider.Value - $desiredAc) -gt 0.01) {
+            $NamedElements.TdpAcSlider.Value = $desiredAc
+        }
+    }
+
+    if ($NamedElements.ContainsKey('TdpDcSlider') -and $NamedElements.TdpDcSlider -and $script:appConfig) {
+        $NamedElements.TdpDcSlider.Minimum = [double]$script:tdpCustomRange.MinW
+        $NamedElements.TdpDcSlider.Maximum = [double]$script:tdpCustomRange.MaxW
+        $desiredDc = [double]$script:appConfig.TdpDcW
+        if ([Math]::Abs([double]$NamedElements.TdpDcSlider.Value - $desiredDc) -gt 0.01) {
+            $NamedElements.TdpDcSlider.Value = $desiredDc
+        }
+        $NamedElements.TdpDcSlider.IsEnabled = -not [bool]$script:appConfig.UnifyAcDcTdp
+        $NamedElements.TdpDcSlider.Opacity = if ([bool]$script:appConfig.UnifyAcDcTdp) { 0.55 } else { 1.0 }
+    }
+
+    if ($NamedElements.ContainsKey('TdpAcValueText') -and $NamedElements.TdpAcValueText -and $script:appConfig) {
+        $NamedElements.TdpAcValueText.Text = ('{0}W' -f [int]$script:appConfig.TdpAcW)
+    }
+
+    if ($NamedElements.ContainsKey('TdpDcValueText') -and $NamedElements.TdpDcValueText -and $script:appConfig) {
+        $NamedElements.TdpDcValueText.Text = ('{0}W' -f [int]$script:appConfig.TdpDcW)
+        $NamedElements.TdpDcValueText.Opacity = if ([bool]$script:appConfig.UnifyAcDcTdp) { 0.65 } else { 1.0 }
+    }
+
+    if ($NamedElements.ContainsKey('TdpApplyActiveProfileButton') -and $NamedElements.TdpApplyActiveProfileButton -and $script:appConfig) {
+        $activeTarget = Get-TdpTargetForPowerState -Snapshot $Snapshot -ProfileMode 'Auto'
+        $isActive = ($null -ne $activeTarget) -and ($null -ne $tdpState.CurrentLimitW) -and ([Math]::Abs($tdpState.CurrentLimitW - $activeTarget) -le 0.6)
+        $NamedElements.TdpApplyActiveProfileButton.Content = if (Get-IsAcPowerSource -Snapshot $Snapshot) { 'Apply AC' } else { 'Apply DC' }
+        $NamedElements.TdpApplyActiveProfileButton.Background = if ($isActive) { New-Brush '#3358D68D' } else { New-Brush '#14FFFFFF' }
+        $NamedElements.TdpApplyActiveProfileButton.BorderBrush = if ($isActive) { New-Brush '#6676F0A5' } else { New-Brush '#2DFFFFFF' }
+        $NamedElements.TdpApplyActiveProfileButton.Foreground = if ($isActive) { New-Brush '#FFF6FFF9' } else { New-Brush '#FFDDECF9' }
+    }
+
+    if ($NamedElements.ContainsKey('ProfileComboBox') -and $NamedElements.ProfileComboBox -and $script:appConfig) {
+        Ensure-AppProfileStore -Config $script:appConfig
+        $profileNames = @($script:appConfig.ProfileStore | ForEach-Object { [string]$_.Name })
+        $currentItems = @($NamedElements.ProfileComboBox.Items | ForEach-Object { [string]$_ })
+
+        $itemsChanged = ($profileNames.Count -ne $currentItems.Count)
+        if (-not $itemsChanged) {
+            for ($i = 0; $i -lt $profileNames.Count; $i++) {
+                if (-not [string]::Equals($profileNames[$i], $currentItems[$i], [System.StringComparison]::Ordinal)) {
+                    $itemsChanged = $true
+                    break
+                }
+            }
+        }
+
+        if ($itemsChanged) {
+            $NamedElements.ProfileComboBox.Items.Clear()
+            foreach ($name in $profileNames) {
+                [void]$NamedElements.ProfileComboBox.Items.Add($name)
+            }
+        }
+
+        $targetProfileName = [string]$script:appConfig.ActiveProfileName
+        if ([string]::IsNullOrWhiteSpace($targetProfileName) -and $profileNames.Count -gt 0) {
+            $targetProfileName = [string]$profileNames[0]
+            $script:appConfig.ActiveProfileName = $targetProfileName
+        }
+        if ($targetProfileName -and -not [string]::Equals([string]$NamedElements.ProfileComboBox.SelectedItem, $targetProfileName, [System.StringComparison]::Ordinal)) {
+            $NamedElements.ProfileComboBox.SelectedItem = $targetProfileName
+        }
+    }
+
+    if ($NamedElements.ContainsKey('ChargeLimitStatusText') -and $NamedElements.ChargeLimitStatusText) {
+        $statusText = if ($script:chargeLimitState.LastStatusMessage) { $script:chargeLimitState.LastStatusMessage } else { Get-ChargeLimitStatusText -Snapshot $Snapshot }
+        $NamedElements.ChargeLimitStatusText.Text = $statusText
+        $NamedElements.ChargeLimitStatusText.Foreground = if ($statusText -like 'Reached*') {
+            New-Brush '#FFFFD88D'
+        } elseif ($statusText -like 'Charge guard disabled*' -or $statusText -like 'Charge limit off*') {
+            New-Brush '#A9CCE0F0'
+        } else {
+            New-Brush '#BFE4F6FF'
+        }
+    }
+
+    $hasBatteryData = ($Snapshot -and $null -ne $Snapshot.BatteryLevel)
+    foreach ($chargeButtonName in @('ChargeLimitOffButton','ChargeLimit80Button','ChargeLimit90Button','ChargeLimit95Button')) {
+        if ($NamedElements.ContainsKey($chargeButtonName) -and $NamedElements[$chargeButtonName]) {
+            $NamedElements[$chargeButtonName].IsEnabled = $hasBatteryData
+            $NamedElements[$chargeButtonName].Opacity = if ($hasBatteryData) { 1.0 } else { 0.45 }
+        }
+    }
+
+    if ($NamedElements.ContainsKey('GyroAvailableBadge') -and $NamedElements.GyroAvailableBadge) {
+        $NamedElements.GyroAvailableBadge.Background = if ($gyroState.IsAvailable) { New-Brush '#2233C074' } else { New-Brush '#14FFFFFF' }
+        $NamedElements.GyroAvailableBadge.BorderBrush = if ($gyroState.IsAvailable) { New-Brush '#5562E0A0' } else { New-Brush '#2DFFFFFF' }
+    }
+    if ($NamedElements.ContainsKey('GyroAvailableText') -and $NamedElements.GyroAvailableText) {
+        $gyroAvailabilityText = if ($gyroState.IsAvailable) { 'Available' } else { 'Unavailable' }
+        $NamedElements.GyroAvailableText.Text = Translate-UiRuntimeText -Text $gyroAvailabilityText
+        $NamedElements.GyroAvailableText.Foreground = if ($gyroState.IsAvailable) { New-Brush '#FFB8FFD8' } else { New-Brush '#FFDDECF9' }
+    }
+    if ($NamedElements.ContainsKey('GyroStatusText') -and $NamedElements.GyroStatusText) {
+        $deviceLabel = $gyroState.DeviceName
+        if ($deviceLabel -and $deviceLabel.ToLowerInvariant().Contains('usb')) {
+            $deviceLabel = 'Handheld Mode'
+        }
+        $suffix = if ($deviceLabel) { (' - ' + $deviceLabel) } else { '' }
+        $NamedElements.GyroStatusText.Text = ((Translate-UiRuntimeText -Text $gyroState.LastMessage) + $suffix)
+        $NamedElements.GyroStatusText.Foreground = if ($gyroState.IsAvailable) {
+            if ($gyroState.IsEnabled) { New-Brush '#FF8EE7B3' } else { New-Brush '#BFE4F6FF' }
+        } else {
+            New-Brush '#FFFFB2B2'
+        }
     }
 
     if ($NamedElements.ContainsKey('TdpCustomPanel') -and $NamedElements.TdpCustomPanel) {
@@ -2960,29 +4145,25 @@ function Update-TdpControlsUi {
         }
     }
 
-    if ($NamedElements.ContainsKey('ModesPanel') -and $NamedElements.ModesPanel) {
-        $showModes = if ($script:appConfig) { [bool]$script:appConfig.ShowModesPanel } else { $false }
+    if ($NamedElements.ContainsKey('ModesPanel') -and $NamedElements.ModesPanel -and $script:appConfig -and [bool]$script:appConfig.ShowFpsBlock) {
+        $showModes = [bool]$script:appConfig.ShowModesPanel
         Set-ModesPanelState -NamedElements $NamedElements -IsVisible $showModes
     }
     if ($NamedElements.ContainsKey('FpsCurrentText') -and $NamedElements.FpsCurrentText) {
         $NamedElements.FpsCurrentText.Text = if ($fpsLimiter -gt 0) { ('{0} fps' -f $fpsLimiter) } else { 'Off' }
     }
     if ($NamedElements.ContainsKey('FpsStatusText') -and $NamedElements.FpsStatusText) {
-        $NamedElements.FpsStatusText.Text = if ($fpsLimiter -gt 0) { ('FPS limiter profile active: {0} fps' -f $fpsLimiter) } else { 'FPS limiter off' }
+        $fpsStatusRaw = if ($fpsLimiter -gt 0) { ('FPS limiter profile active: {0} fps' -f $fpsLimiter) } else { 'FPS limiter off' }
+        $NamedElements.FpsStatusText.Text = Translate-UiRuntimeText -Text $fpsStatusRaw
         $NamedElements.FpsStatusText.Foreground = if ($fpsLimiter -gt 0) { New-Brush '#FF9DD4FF' } else { New-Brush '#BFE4F6FF' }
     }
     if ($NamedElements.ContainsKey('ModesSummaryText') -and $NamedElements.ModesSummaryText) {
-        if ($fpsLimiter -gt 0) {
-            $NamedElements.ModesSummaryText.Text = 'Active mode: FPS ' + $fpsLimiter
-            $NamedElements.ModesSummaryText.Foreground = New-Brush '#FF9DD4FF'
-            $NamedElements.ModesSummaryText.Visibility = 'Visible'
-        } else {
-            $NamedElements.ModesSummaryText.Visibility = 'Collapsed'
-        }
+        $NamedElements.ModesSummaryText.Visibility = 'Collapsed'
     }
 
     if ($NamedElements.ContainsKey('FanStatusText') -and $NamedElements.FanStatusText) {
-        $NamedElements.FanStatusText.Text = if ($fanState.LastMessage) { $fanState.LastMessage } else { 'Fan status unavailable' }
+        $fanStatusRaw = if ($fanState.LastMessage) { $fanState.LastMessage } else { 'Fan status unavailable' }
+        $NamedElements.FanStatusText.Text = Translate-UiRuntimeText -Text $fanStatusRaw
         $NamedElements.FanStatusText.Foreground = if ($fanState.LastApplyStatus -eq 'Applied') {
             New-Brush '#FF9DD4FF'
         } elseif ($fanState.LastApplyStatus -eq 'Pending') {
@@ -3013,7 +4194,8 @@ function Update-TdpControlsUi {
     }
 
     if ($NamedElements.ContainsKey('HzStatusText') -and $NamedElements.HzStatusText) {
-        $NamedElements.HzStatusText.Text = if ($refreshState.LastMessage) { $refreshState.LastMessage } else { 'Refresh rate unavailable' }
+        $hzStatusRaw = if ($refreshState.LastMessage) { $refreshState.LastMessage } else { 'Refresh rate unavailable' }
+        $NamedElements.HzStatusText.Text = Translate-UiRuntimeText -Text $hzStatusRaw
         $NamedElements.HzStatusText.Foreground = if ($refreshState.LastApplyStatus -eq 'Applied') {
             New-Brush '#FF9BDCF0'
         } elseif ($refreshState.LastApplyStatus -eq 'Error') {
@@ -3025,7 +4207,9 @@ function Update-TdpControlsUi {
 
     Set-TdpPresetVisual -NamedElements $NamedElements -CurrentLimitW $tdpState.CurrentLimitW
     Set-FanPresetVisual -NamedElements $NamedElements -Mode $fanState.Mode
+    Set-GyroToggleVisual -NamedElements $NamedElements -IsEnabled ([bool]$gyroState.IsEnabled) -IsAvailable ([bool]$gyroState.IsAvailable)
     Set-FpsPresetVisual -NamedElements $NamedElements -FpsLimiter $fpsLimiter
+    Set-ChargeLimitPresetVisual -NamedElements $NamedElements -ChargeLimitPercent (Normalize-ChargeLimitPercent -Value $script:appConfig.ChargeLimitPercent -Fallback 0) -GuardEnabled ([bool]$script:appConfig.EnableChargeLimitGuard)
     Set-RefreshPresetVisual -NamedElements $NamedElements -CurrentHz $refreshState.CurrentHz -Supports60 $refreshState.Supports60 -Supports120 $refreshState.Supports120
     Update-EdgeControlsUi -NamedElements $NamedElements
 }
@@ -3101,13 +4285,260 @@ function Update-Sparkline {
     [void]$Canvas.Children.Add($polyline)
 }
 
+function Get-UiText {
+    param([string]$Key)
+    $isVie = ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE')
+    $en = @{
+        Subtitle = 'TDP, battery flow, internet'
+        OpenDisplaySettings = 'Open display settings'
+        SwitchLanguage = 'Switch language'
+        PinOnTop = 'Pin on top'
+        ExitApp = 'Exit application'
+        SwitchCompactMode = 'Switch to compact mode'
+        SwitchFullMode = 'Switch to full mode'
+        LanguageButtonEng = 'ENG'
+        LanguageButtonVie = 'VIE'
+        DisplaySettings = 'Display Settings'
+        ShowHideBlocks = 'Show / Hide Blocks'
+        TdpControl = 'TDP control'
+        ChargeLimit = 'Charge limit'
+        Gyro = 'Gyro'
+        FanProfile = 'Fan profile'
+        FpsLimiter = 'FPS limiter'
+        CpuPowerCard = 'CPU power card'
+        PowerFlowCard = 'Power flow card'
+        BatteryEtaCard = 'Battery ETA card'
+        CustomTdp = 'CUSTOM 4-25W'
+        FanOff = 'Off'
+        FanLow = 'Low'
+        FanMedium = 'Medium'
+        FanMax = 'Max'
+        FanAuto = 'Auto'
+        GyroOn = 'On'
+        GyroOff = 'Off'
+        RefreshRate = 'REFRESH RATE'
+        PowerFlow = 'POWER FLOW'
+        BatteryEta = 'BATTERY ETA'
+        Online = 'Online'
+        DataSource = 'Data'
+        Updated = 'Updated'
+        Cancel = 'Cancel'
+        Save = 'Save'
+    }
+    $vi = @{
+        Subtitle = 'TDP, pin, mạng'
+        OpenDisplaySettings = 'Mở cài đặt hiển thị'
+        SwitchLanguage = 'Đổi ngôn ngữ'
+        PinOnTop = 'Ghim cửa sổ lên trên'
+        ExitApp = 'Thoát ứng dụng'
+        SwitchCompactMode = 'Chuyển sang chế độ gọn'
+        SwitchFullMode = 'Chuyển sang chế độ đầy đủ'
+        LanguageButtonEng = 'ENG'
+        LanguageButtonVie = 'VIE'
+        DisplaySettings = 'Cài Đặt Hiển Thị'
+        ShowHideBlocks = 'Bật / Tắt các khối tính năng'
+        TdpControl = 'Điều khiển TDP'
+        ChargeLimit = 'Giới hạn sạc'
+        Gyro = 'Gyro'
+        FanProfile = 'Chế độ quạt'
+        FpsLimiter = 'Giới hạn FPS'
+        CpuPowerCard = 'Thẻ công suất CPU'
+        PowerFlowCard = 'Thẻ dòng năng lượng'
+        BatteryEtaCard = 'Thẻ pin còn lại'
+        CustomTdp = 'TÙY CHỈNH 4-25W'
+        FanOff = 'Tắt'
+        FanLow = 'Thấp'
+        FanMedium = 'Vừa'
+        FanMax = 'Tối đa'
+        FanAuto = 'Tự động'
+        GyroOn = 'Bật'
+        GyroOff = 'Tắt'
+        RefreshRate = 'TẦN SỐ QUÉT'
+        PowerFlow = 'DÒNG NĂNG LƯỢNG'
+        BatteryEta = 'PIN CÒN LẠI'
+        Online = 'Trực tuyến'
+        DataSource = 'Dữ liệu'
+        Updated = 'Cập nhật'
+        Cancel = 'Hủy'
+        Save = 'Lưu'
+    }
+    if ($isVie -and $vi.ContainsKey($Key)) { return $vi[$Key] }
+    if ($en.ContainsKey($Key)) { return $en[$Key] }
+    return $Key
+}
+
+function Translate-UiRuntimeText {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $Text }
+    if (-not $script:appConfig -or [string]$script:appConfig.UiLanguage -ne 'VIE') { return $Text }
+
+    $result = [string]$Text
+    $result = $result -replace 'TDP controller ready', 'Bộ điều khiển TDP sẵn sàng'
+    $result = $result -replace 'TDP controller idle', 'Bộ điều khiển TDP đang chờ'
+    $result = $result -replace 'TDP status unavailable', 'Không lấy được trạng thái TDP'
+    $result = $result -replace 'Fan controller idle', 'Bộ điều khiển quạt đang chờ'
+    $result = $result -replace 'Fan status unavailable', 'Không lấy được trạng thái quạt'
+    $result = $result -replace 'Refresh rate idle', 'Tần số quét đang chờ'
+    $result = $result -replace 'Refresh rate unavailable', 'Không lấy được tần số quét'
+    $result = $result -replace 'Available', 'Sẵn sàng'
+    $result = $result -replace 'Unavailable', 'Không khả dụng'
+    $result = $result -replace 'Gyro enabled', 'Gyro đã bật'
+    $result = $result -replace 'Gyro disabled', 'Gyro đã tắt'
+    $result = $result -replace 'Gyro ready \(off\)', 'Gyro sẵn sàng (đang tắt)'
+    $result = $result -replace 'Gyro not detected', 'Không phát hiện cảm biến gyro'
+    $result = $result -replace 'Fan mode:', 'Chế độ quạt:'
+    $result = $result -replace 'manual hold', 'giữ tay'
+    $result = $result -replace 'System drain', 'Mức tiêu thụ hệ thống'
+    $result = $result -replace 'Online', 'Trực tuyến'
+    $result = $result -replace 'Offline', 'Ngoại tuyến'
+    $result = $result -replace 'Plugged in', 'Đang cắm sạc'
+    $result = $result -replace 'Until empty', 'Đến khi cạn pin'
+    $result = $result -replace 'To full charge', 'Đến khi sạc đầy'
+    return $result
+}
+
+function Show-DisplaySettingsDialog {
+    param(
+        [System.Windows.Window]$OwnerWindow
+    )
+
+    if (-not $script:appConfig) { return $false }
+
+    $dialogTitle = Get-UiText -Key 'DisplaySettings'
+    $dialogHint = Get-UiText -Key 'ShowHideBlocks'
+    $labelTdp = Get-UiText -Key 'TdpControl'
+    $labelCharge = Get-UiText -Key 'ChargeLimit'
+    $labelGyro = Get-UiText -Key 'Gyro'
+    $labelFan = Get-UiText -Key 'FanProfile'
+    $labelFps = Get-UiText -Key 'FpsLimiter'
+    $labelCpu = Get-UiText -Key 'CpuPowerCard'
+    $labelFlow = Get-UiText -Key 'PowerFlowCard'
+    $labelBattery = Get-UiText -Key 'BatteryEtaCard'
+    $labelCancel = Get-UiText -Key 'Cancel'
+    $labelSave = Get-UiText -Key 'Save'
+
+    [xml]$dialogXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="350"
+        Height="450"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        Background="Transparent">
+    <Border CornerRadius="18" Padding="14" BorderBrush="#3AF3F6FF" BorderThickness="1">
+        <Border.Background>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#F4151A2B" Offset="0"/>
+                <GradientStop Color="#F40F1622" Offset="1"/>
+            </LinearGradientBrush>
+        </Border.Background>
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="$dialogTitle" Foreground="#FFF5F7FB" FontFamily="Bahnschrift SemiBold" FontSize="18"/>
+                <Button x:Name="DialogCloseButton" Grid.Column="1" Width="28" Height="28" Content="X"
+                        Background="#18FFFFFF" BorderBrush="#2EFFFFFF" Foreground="#FFF5F7FB"/>
+            </Grid>
+            <StackPanel Grid.Row="1" Margin="0,10,0,0">
+                <TextBlock Text="$dialogHint" Foreground="#BFE4F6FF" FontFamily="Segoe UI Variable Text" FontSize="10.5"/>
+                <CheckBox x:Name="ShowTdpBlockCheck" Content="$labelTdp" Margin="0,10,0,0" Foreground="#FFF5F7FB"/>
+                <CheckBox x:Name="ShowChargeBlockCheck" Content="$labelCharge" Margin="0,6,0,0" Foreground="#FFF5F7FB"/>
+                <CheckBox x:Name="ShowGyroBlockCheck" Content="$labelGyro" Margin="0,6,0,0" Foreground="#FFF5F7FB"/>
+                <CheckBox x:Name="ShowFanBlockCheck" Content="$labelFan" Margin="0,6,0,0" Foreground="#FFF5F7FB"/>
+                <CheckBox x:Name="ShowFpsBlockCheck" Content="$labelFps" Margin="0,6,0,0" Foreground="#FFF5F7FB"/>
+                <Border Margin="0,10,0,8" Height="1" Background="#28FFFFFF"/>
+                <CheckBox x:Name="ShowCpuCardCheck" Content="$labelCpu" Margin="0,2,0,0" Foreground="#FFF5F7FB"/>
+                <CheckBox x:Name="ShowPowerFlowCardCheck" Content="$labelFlow" Margin="0,6,0,0" Foreground="#FFF5F7FB"/>
+                <CheckBox x:Name="ShowBatteryCardCheck" Content="$labelBattery" Margin="0,6,0,0" Foreground="#FFF5F7FB"/>
+            </StackPanel>
+            <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+                <Button x:Name="CancelButton" Content="$labelCancel" Width="78" Margin="0,0,8,0"
+                        Background="#14FFFFFF" BorderBrush="#2DFFFFFF" Foreground="#FFDDECF9"/>
+                <Button x:Name="SaveButton" Content="$labelSave" Width="78"
+                        Background="#3347B7FF" BorderBrush="#6689D8FF" Foreground="#FFF7FCFF"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>
+"@
+
+    $reader = New-Object System.Xml.XmlNodeReader $dialogXaml
+    $dialog = [Windows.Markup.XamlReader]::Load($reader)
+    $dialog.Owner = $OwnerWindow
+
+    $showTdp = $dialog.FindName('ShowTdpBlockCheck')
+    $showCharge = $dialog.FindName('ShowChargeBlockCheck')
+    $showGyro = $dialog.FindName('ShowGyroBlockCheck')
+    $showFan = $dialog.FindName('ShowFanBlockCheck')
+    $showFps = $dialog.FindName('ShowFpsBlockCheck')
+    $showCpu = $dialog.FindName('ShowCpuCardCheck')
+    $showFlow = $dialog.FindName('ShowPowerFlowCardCheck')
+    $showBattery = $dialog.FindName('ShowBatteryCardCheck')
+    $cancelBtn = $dialog.FindName('CancelButton')
+    $saveBtn = $dialog.FindName('SaveButton')
+    $dialogCloseBtn = $dialog.FindName('DialogCloseButton')
+
+    $showTdp.IsChecked = [bool]$script:appConfig.ShowTdpBlock
+    $showCharge.IsChecked = [bool]$script:appConfig.ShowChargeBlock
+    $showGyro.IsChecked = [bool]$script:appConfig.ShowGyroBlock
+    $showFan.IsChecked = [bool]$script:appConfig.ShowFanBlock
+    $showFps.IsChecked = [bool]$script:appConfig.ShowFpsBlock
+    $showCpu.IsChecked = [bool]$script:appConfig.ShowCpuCard
+    $showFlow.IsChecked = [bool]$script:appConfig.ShowPowerFlowCard
+    $showBattery.IsChecked = [bool]$script:appConfig.ShowBatteryCard
+
+    $cancelBtn.Add_Click({ $dialog.DialogResult = $false; $dialog.Close() })
+    $dialogCloseBtn.Add_Click({ $dialog.DialogResult = $false; $dialog.Close() })
+    $saveBtn.Add_Click({
+        $script:appConfig.ShowTdpBlock = [bool]$showTdp.IsChecked
+        $script:appConfig.ShowChargeBlock = [bool]$showCharge.IsChecked
+        $script:appConfig.ShowGyroBlock = [bool]$showGyro.IsChecked
+        $script:appConfig.ShowFanBlock = [bool]$showFan.IsChecked
+        $script:appConfig.ShowFpsBlock = [bool]$showFps.IsChecked
+        $script:appConfig.ShowCpuCard = [bool]$showCpu.IsChecked
+        $script:appConfig.ShowPowerFlowCard = [bool]$showFlow.IsChecked
+        $script:appConfig.ShowBatteryCard = [bool]$showBattery.IsChecked
+        Save-AppConfig
+        $dialog.DialogResult = $true
+        $dialog.Close()
+    })
+
+    $result = $dialog.ShowDialog()
+    return ($result -eq $true)
+}
+
 $script:appConfig = Load-AppConfig
+$null = Load-ProfileToCurrentConfig -ProfileName ([string]$script:appConfig.ActiveProfileName)
 $script:appConfig.TdpCustomW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, [int]$script:appConfig.TdpCustomW))
+$script:appConfig.TdpAcW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, [int]$script:appConfig.TdpAcW))
+$script:appConfig.TdpDcW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, [int]$script:appConfig.TdpDcW))
+if ([bool]$script:appConfig.UnifyAcDcTdp) {
+    $script:appConfig.TdpDcW = $script:appConfig.TdpAcW
+}
 $script:appConfig.FpsLimiter = if ($script:fpsLimiterLevels -contains [int]$script:appConfig.FpsLimiter) { [int]$script:appConfig.FpsLimiter } else { 0 }
-$script:edgeDockState.Enabled = [bool]$script:appConfig.EnableEdgeSidebar
+$script:appConfig.ChargeLimitPercent = Normalize-ChargeLimitPercent -Value $script:appConfig.ChargeLimitPercent -Fallback 0
+$script:appConfig.EnableChargeLimitGuard = Convert-ToConfigBoolean -Value $script:appConfig.EnableChargeLimitGuard -Fallback $true
+$script:appConfig.EnableChargeLimitGuard = $false
+$script:appConfig.ChargeLimitPercent = 0
+$script:appConfig.ShowChargeBlock = $false
+$script:appConfig.IsCompact = $false
+$script:appConfig.IsPinned = $false
+$script:isPinned = $false
+$script:edgeDockState.Enabled = $false
 $script:edgeDockState.AutoHideSeconds = [Math]::Max(2, [Math]::Min(30, [int]$script:appConfig.EdgeAutoHideSeconds))
 $script:edgeDockState.LastInteractionAt = Get-Date
-$script:appConfig.EnableEdgeSidebar = $script:edgeDockState.Enabled
+$script:appConfig.EnableEdgeSidebar = $false
 $script:appConfig.EdgeAutoHideSeconds = $script:edgeDockState.AutoHideSeconds
 $computer = New-HardwareComputer
 
@@ -3169,6 +4600,10 @@ try {
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="8"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="8"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="8"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
                 <StackPanel x:Name="TitleStack"
@@ -3191,8 +4626,8 @@ try {
                         Grid.Column="2"
                         Width="34"
                         Height="34"
-                        Background="#3349D17C"
-                        BorderBrush="#6675F0A2"
+                        Background="#18FFFFFF"
+                        BorderBrush="#2EFFFFFF"
                         Foreground="#FFF5F7FB"
                         FontSize="13"
                         FontFamily="Bahnschrift SemiBold"
@@ -3212,7 +4647,7 @@ try {
                         Content="📌"
                         ToolTip="Pin on top"/>
 
-                <Button x:Name="SidebarButton"
+                <Button x:Name="LanguageButton"
                         Grid.Row="0"
                         Grid.Column="6"
                         Width="34"
@@ -3220,14 +4655,14 @@ try {
                         Background="#18FFFFFF"
                         BorderBrush="#2EFFFFFF"
                         Foreground="#FFF5F7FB"
-                        FontSize="13"
-                        FontFamily="Segoe UI Symbol"
-                        Content="⇆"
-                        ToolTip="Toggle right sidebar mode"/>
+                        FontSize="10"
+                        FontFamily="Bahnschrift SemiBold"
+                        Content="ENG"
+                        ToolTip="Switch language"/>
 
                 <Button x:Name="CloseButton"
                         Grid.Row="0"
-                        Grid.Column="8"
+                        Grid.Column="10"
                         Width="34"
                         Height="34"
                         Background="#18FFFFFF"
@@ -3238,9 +4673,35 @@ try {
                         Content="X"
                         ToolTip="Exit application"/>
 
+                <Button x:Name="SettingsButton"
+                        Grid.Row="0"
+                        Grid.Column="8"
+                        Width="34"
+                        Height="34"
+                        Background="#18FFFFFF"
+                        BorderBrush="#2EFFFFFF"
+                        Foreground="#FFF5F7FB"
+                        FontSize="13"
+                        FontFamily="Segoe UI Symbol"
+                        Content="⚙"
+                        ToolTip="Open display settings"/>
+
+                <Button x:Name="SidebarButton"
+                        Grid.Row="0"
+                        Grid.Column="12"
+                        Width="34"
+                        Height="34"
+                        Background="#18FFFFFF"
+                        BorderBrush="#2EFFFFFF"
+                        Foreground="#FFF5F7FB"
+                        FontSize="13"
+                        FontFamily="Segoe UI Symbol"
+                        Content="⇆"
+                        ToolTip="Toggle right sidebar mode"/>
+
                 <StackPanel Grid.Row="1"
                             Grid.Column="0"
-                            Grid.ColumnSpan="9"
+                            Grid.ColumnSpan="13"
                             Orientation="Horizontal"
                             Margin="0,7,0,0">
                     <Border x:Name="InternetBadge"
@@ -3326,7 +4787,7 @@ try {
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
 
-                        <TextBlock Text="TDP CONTROL"
+                        <TextBlock x:Name="TdpControlTitleText" Text="TDP CONTROL"
                                    Foreground="#BCEFF8FF"
                                    FontFamily="Bahnschrift SemiBold"
                                    FontSize="9.8"
@@ -3416,6 +4877,348 @@ try {
                                FontFamily="Segoe UI Variable Text"
                                FontSize="9.2"
                                Text="TDP controller idle"/>
+                    <Grid x:Name="TdpPowerProfilePanel"
+                          Margin="0,6,0,0"
+                          VerticalAlignment="Center">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="AC/DC PROFILE"
+                                   Foreground="#BCEFF8FF"
+                                   FontFamily="Bahnschrift SemiBold"
+                                   FontSize="9.3"
+                                   VerticalAlignment="Center"/>
+                        <Border Grid.Column="2"
+                                Padding="7,2"
+                                CornerRadius="10"
+                                Background="#123A6B9C"
+                                BorderBrush="#2AFFFFFF"
+                                BorderThickness="1"
+                                VerticalAlignment="Center">
+                            <TextBlock x:Name="TdpPowerStateText"
+                                       Foreground="#FFF2FBFF"
+                                       FontFamily="Bahnschrift SemiBold"
+                                       FontSize="9.1"
+                                       Text="Power DC"/>
+                        </Border>
+                        <CheckBox x:Name="UnifyAcDcTdpCheckBox"
+                                  Grid.Column="3"
+                                  HorizontalAlignment="Right"
+                                  VerticalAlignment="Center"
+                                  Foreground="#BFE4F6FF"
+                                  FontFamily="Segoe UI Variable Text"
+                                  FontSize="9.1"
+                                  Content="Unify AC/DC"/>
+
+                        <Grid x:Name="TdpPowerDetailGrid"
+                              Grid.Row="1"
+                              Grid.ColumnSpan="4"
+                              Margin="0,5,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="8"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="8"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Padding="7,4"
+                                    CornerRadius="10"
+                                    Background="#0F1B2D43"
+                                    BorderBrush="#1DFFFFFF"
+                                    BorderThickness="1">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="6"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="6"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="AC"
+                                               Foreground="#FFDDECF9"
+                                               FontFamily="Bahnschrift SemiBold"
+                                               FontSize="9.2"
+                                               VerticalAlignment="Center"/>
+                                    <Slider x:Name="TdpAcSlider"
+                                            Grid.Column="2"
+                                            Minimum="4"
+                                            Maximum="25"
+                                            TickFrequency="1"
+                                            IsSnapToTickEnabled="True"
+                                            Value="12"/>
+                                    <TextBlock x:Name="TdpAcValueText"
+                                               Grid.Column="4"
+                                               Foreground="#FFF8FBFF"
+                                               FontFamily="Bahnschrift SemiBold"
+                                               FontSize="9.2"
+                                               VerticalAlignment="Center"
+                                               Text="12W"/>
+                                </Grid>
+                            </Border>
+
+                            <Border Grid.Column="2"
+                                    Padding="7,4"
+                                    CornerRadius="10"
+                                    Background="#0F1B2D43"
+                                    BorderBrush="#1DFFFFFF"
+                                    BorderThickness="1">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="6"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="6"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="DC"
+                                               Foreground="#FFDDECF9"
+                                               FontFamily="Bahnschrift SemiBold"
+                                               FontSize="9.2"
+                                               VerticalAlignment="Center"/>
+                                    <Slider x:Name="TdpDcSlider"
+                                            Grid.Column="2"
+                                            Minimum="4"
+                                            Maximum="25"
+                                            TickFrequency="1"
+                                            IsSnapToTickEnabled="True"
+                                            Value="8"/>
+                                    <TextBlock x:Name="TdpDcValueText"
+                                               Grid.Column="4"
+                                               Foreground="#FFF8FBFF"
+                                               FontFamily="Bahnschrift SemiBold"
+                                               FontSize="9.2"
+                                               VerticalAlignment="Center"
+                                               Text="8W"/>
+                                </Grid>
+                            </Border>
+
+                            <Button x:Name="TdpApplyActiveProfileButton"
+                                    Grid.Column="4"
+                                    Padding="8,2"
+                                    MinWidth="62"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Center"
+                                    Margin="0,0,0,0"
+                                    Background="#14FFFFFF"
+                                    BorderBrush="#2DFFFFFF"
+                                    Foreground="#FFDDECF9"
+                                    FontFamily="Bahnschrift SemiBold"
+                                    FontSize="9.1"
+                                    Content="Apply"/>
+                        </Grid>
+                    </Grid>
+                    <Grid x:Name="ProfileManagerPanel"
+                          Margin="0,6,0,0"
+                          VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="140"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="PROFILE"
+                                   Foreground="#BCEFF8FF"
+                                   FontFamily="Bahnschrift SemiBold"
+                                   FontSize="9.3"
+                                   VerticalAlignment="Center"/>
+                        <ComboBox x:Name="ProfileComboBox"
+                                  Grid.Column="2"
+                                  Height="24"
+                                  VerticalAlignment="Center"
+                                  Background="#14243B54"
+                                  BorderBrush="#2DFFFFFF"
+                                  Foreground="#FFF1F7FD"
+                                  FontFamily="Segoe UI Variable Text"
+                                  FontSize="9.2"
+                                  IsEditable="False"/>
+                        <StackPanel Grid.Column="3"
+                                    Orientation="Horizontal"
+                                    HorizontalAlignment="Right">
+                            <Button x:Name="ProfileNewButton"
+                                    Margin="6,0,0,0"
+                                    Padding="7,2"
+                                    MinWidth="42"
+                                    Background="#14FFFFFF"
+                                    BorderBrush="#2DFFFFFF"
+                                    Foreground="#FFDDECF9"
+                                    FontFamily="Bahnschrift SemiBold"
+                                    FontSize="9"
+                                    Content="New"/>
+                            <Button x:Name="ProfileSaveButton"
+                                    Margin="6,0,0,0"
+                                    Padding="7,2"
+                                    MinWidth="44"
+                                    Background="#14FFFFFF"
+                                    BorderBrush="#2DFFFFFF"
+                                    Foreground="#FFDDECF9"
+                                    FontFamily="Bahnschrift SemiBold"
+                                    FontSize="9"
+                                    Content="Save"/>
+                            <Button x:Name="ProfileLoadButton"
+                                    Margin="6,0,0,0"
+                                    Padding="7,2"
+                                    MinWidth="44"
+                                    Background="#14FFFFFF"
+                                    BorderBrush="#2DFFFFFF"
+                                    Foreground="#FFDDECF9"
+                                    FontFamily="Bahnschrift SemiBold"
+                                    FontSize="9"
+                                    Content="Load"/>
+                            <Button x:Name="ProfileDelButton"
+                                    Margin="6,0,0,0"
+                                    Padding="7,2"
+                                    MinWidth="38"
+                                    Background="#14FFFFFF"
+                                    BorderBrush="#2DFFFFFF"
+                                    Foreground="#FFDDECF9"
+                                    FontFamily="Bahnschrift SemiBold"
+                                    FontSize="9"
+                                    Content="Del"/>
+                            <Button x:Name="ProfileResetButton"
+                                    Margin="6,0,0,0"
+                                    Padding="7,2"
+                                    MinWidth="46"
+                                    Background="#14FFFFFF"
+                                    BorderBrush="#2DFFFFFF"
+                                    Foreground="#FFDDECF9"
+                                    FontFamily="Bahnschrift SemiBold"
+                                    FontSize="9"
+                                    Content="Reset"/>
+                        </StackPanel>
+                    </Grid>
+                    <Grid x:Name="ChargeLimitPanel"
+                          Margin="0,6,0,0"
+                          VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="ChargeLimitTitleText" Text="CHARGE LIMIT"
+                                   Foreground="#BCEFF8FF"
+                                   FontFamily="Bahnschrift SemiBold"
+                                   FontSize="9.3"
+                                   VerticalAlignment="Center"/>
+                        <StackPanel Grid.Column="1"
+                                    Orientation="Horizontal"
+                                    HorizontalAlignment="Right">
+                            <Button x:Name="ChargeLimitOffButton"
+                                    Margin="8,0,0,0"
+                                    Padding="8,2"
+                                    MinWidth="42"
+                                    Background="#14FFFFFF"
+                                    BorderBrush="#2DFFFFFF"
+                                    Foreground="#FFDDECF9"
+                                    FontFamily="Bahnschrift SemiBold"
+                                    FontSize="9"
+                                    Content="Off"/>
+                            <Button x:Name="ChargeLimit80Button"
+                                    Margin="6,0,0,0"
+                                    Padding="8,2"
+                                    MinWidth="42"
+                                    Background="#14FFFFFF"
+                                    BorderBrush="#2DFFFFFF"
+                                    Foreground="#FFDDECF9"
+                                    FontFamily="Bahnschrift SemiBold"
+                                    FontSize="9"
+                                    Content="80%"/>
+                            <Button x:Name="ChargeLimit90Button"
+                                    Margin="6,0,0,0"
+                                    Padding="8,2"
+                                    MinWidth="42"
+                                    Background="#14FFFFFF"
+                                    BorderBrush="#2DFFFFFF"
+                                    Foreground="#FFDDECF9"
+                                    FontFamily="Bahnschrift SemiBold"
+                                    FontSize="9"
+                                    Content="90%"/>
+                            <Button x:Name="ChargeLimit95Button"
+                                    Margin="6,0,0,0"
+                                    Padding="8,2"
+                                    MinWidth="42"
+                                    Background="#14FFFFFF"
+                                    BorderBrush="#2DFFFFFF"
+                                    Foreground="#FFDDECF9"
+                                    FontFamily="Bahnschrift SemiBold"
+                                    FontSize="9"
+                                    Content="95%"/>
+                        </StackPanel>
+                    </Grid>
+                    <TextBlock x:Name="ChargeLimitStatusText"
+                               Margin="0,4,0,0"
+                               Foreground="#BFE4F6FF"
+                               FontFamily="Segoe UI Variable Text"
+                               FontSize="9.1"
+                               Text="Charge limit off"/>
+                    <Border x:Name="GyroSectionSeparator"
+                            Margin="0,7,0,0"
+                            Height="1"
+                            Background="#1EFFFFFF"/>
+                    <Grid x:Name="GyroPanel"
+                          Margin="0,7,0,0"
+                          VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="GyroTitleText" Text="GYRO"
+                                   Foreground="#BCEFF8FF"
+                                   FontFamily="Bahnschrift SemiBold"
+                                   FontSize="9.8"
+                                   VerticalAlignment="Center"/>
+                        <Border x:Name="GyroAvailableBadge"
+                                Grid.Column="2"
+                                Padding="7,2"
+                                CornerRadius="10"
+                                Background="#14FFFFFF"
+                                BorderBrush="#2DFFFFFF"
+                                BorderThickness="1"
+                                VerticalAlignment="Center">
+                            <TextBlock x:Name="GyroAvailableText"
+                                       Foreground="#FFDDECF9"
+                                       FontFamily="Bahnschrift SemiBold"
+                                       FontSize="9.1"
+                                       Text="Unavailable"/>
+                        </Border>
+                        <StackPanel Grid.Column="3"
+                                    Orientation="Horizontal"
+                                    HorizontalAlignment="Right">
+                            <Button x:Name="GyroOffButton"
+                                    Margin="8,0,0,0"
+                                    Padding="8,2"
+                                    MinWidth="44"
+                                    Background="#14FFFFFF"
+                                    BorderBrush="#2DFFFFFF"
+                                    Foreground="#FFDDECF9"
+                                    FontFamily="Bahnschrift SemiBold"
+                                    FontSize="9.8"
+                                    Content="Off"/>
+                            <Button x:Name="GyroOnButton"
+                                    Margin="6,0,0,0"
+                                    Padding="8,2"
+                                    MinWidth="44"
+                                    Background="#14FFFFFF"
+                                    BorderBrush="#2DFFFFFF"
+                                    Foreground="#FFDDECF9"
+                                    FontFamily="Bahnschrift SemiBold"
+                                    FontSize="9.8"
+                                    Content="On"/>
+                        </StackPanel>
+                    </Grid>
+                    <TextBlock x:Name="GyroStatusText"
+                               Margin="0,6,0,0"
+                               Foreground="#BFE4F6FF"
+                               FontFamily="Segoe UI Variable Text"
+                               FontSize="9.2"
+                               Text="Gyro not detected"/>
                     <TextBlock x:Name="ModesSummaryText"
                                Margin="0,4,0,0"
                                Foreground="#9DD4FF"
@@ -3436,7 +5239,7 @@ try {
                             <ColumnDefinition Width="8"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <TextBlock Text="CUSTOM 4-25W"
+                        <TextBlock x:Name="TdpCustomTitleText" Text="CUSTOM 4-25W"
                                    Foreground="#BCEFF8FF"
                                    FontFamily="Bahnschrift SemiBold"
                                    FontSize="9.3"
@@ -3469,16 +5272,18 @@ try {
                                 Visibility="Collapsed"
                                 Content="Apply"/>
                     </Grid>
-                    <Border Margin="0,7,0,0"
+                    <Border x:Name="FanSectionSeparator"
+                            Margin="0,7,0,0"
                             Height="1"
                             Background="#1EFFFFFF"/>
-                    <Grid Margin="0,7,0,0"
+                    <Grid x:Name="FanPanelHeaderGrid"
+                          Margin="0,7,0,0"
                           VerticalAlignment="Center">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
-                        <TextBlock Text="FAN PROFILE"
+                        <TextBlock x:Name="FanProfileTitleText" Text="FAN PROFILE"
                                    Foreground="#BCEFF8FF"
                                    FontFamily="Bahnschrift SemiBold"
                                    FontSize="9.8"
@@ -3486,8 +5291,18 @@ try {
                         <StackPanel Grid.Column="1"
                                     Orientation="Horizontal"
                                     HorizontalAlignment="Right">
-                            <Button x:Name="FanLowButton"
+                            <Button x:Name="FanOffButton"
                                     Margin="8,0,0,0"
+                                    Padding="8,2"
+                                    MinWidth="44"
+                                    Background="#14FFFFFF"
+                                    BorderBrush="#2DFFFFFF"
+                                    Foreground="#FFDDECF9"
+                                    FontFamily="Bahnschrift SemiBold"
+                                    FontSize="9.8"
+                                    Content="Off"/>
+                            <Button x:Name="FanLowButton"
+                                    Margin="6,0,0,0"
                                     Padding="8,2"
                                     MinWidth="44"
                                     Background="#14FFFFFF"
@@ -3547,7 +5362,7 @@ try {
                                 <ColumnDefinition Width="Auto"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock Text="FPS LIMITER"
+                            <TextBlock x:Name="FpsLimiterTitleText" Text="FPS LIMITER"
                                        Foreground="#BCEFF8FF"
                                        FontFamily="Bahnschrift SemiBold"
                                        FontSize="9.8"
@@ -3627,7 +5442,7 @@ try {
                                 <ColumnDefinition Width="Auto"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock Text="REFRESH RATE"
+                            <TextBlock x:Name="RefreshRateTitleText" Text="REFRESH RATE"
                                        Foreground="#BCEFF8FF"
                                        FontFamily="Bahnschrift SemiBold"
                                        FontSize="9.8"
@@ -3713,7 +5528,8 @@ try {
                     <ColumnDefinition Width="1*"/>
                 </Grid.ColumnDefinitions>
 
-                <Border Grid.Column="0"
+                <Border x:Name="CpuPowerCard"
+                        Grid.Column="0"
                         CornerRadius="22"
                         Padding="16"
                         BorderBrush="#26FFFFFF"
@@ -3724,7 +5540,7 @@ try {
                             <GradientStop Color="#FF0C8A84" Offset="1"/>
                         </LinearGradientBrush>
                     </Border.Background>
-                    <Grid>
+                    <Grid ClipToBounds="True">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="54"/>
@@ -3783,13 +5599,14 @@ try {
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
 
-                    <Border Grid.Row="0"
+                    <Border x:Name="PowerFlowCard"
+                            Grid.Row="0"
                             CornerRadius="20"
                             Padding="14"
                             Background="#16FFFFFF"
                             BorderBrush="#26FFFFFF"
                             BorderThickness="1">
-                        <Grid>
+                        <Grid ClipToBounds="True">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
@@ -3797,7 +5614,7 @@ try {
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
 
-                            <TextBlock Text="POWER FLOW"
+                            <TextBlock x:Name="PowerFlowTitleText" Text="POWER FLOW"
                                        Foreground="#A8F5F7FB"
                                        FontFamily="Bahnschrift SemiBold"
                                        FontSize="11"/>
@@ -3819,12 +5636,14 @@ try {
 
                             <Canvas x:Name="DrainSpark"
                                     Grid.Row="3"
-                                    Height="28"
-                                    Margin="0,10,0,0"/>
+                                    Height="22"
+                                    Margin="0,8,0,0"
+                                    VerticalAlignment="Bottom"/>
                         </Grid>
                     </Border>
 
-                    <Border Grid.Row="2"
+                    <Border x:Name="BatteryEtaCard"
+                            Grid.Row="2"
                             CornerRadius="20"
                             Padding="14"
                             Background="#14FFFFFF"
@@ -3838,7 +5657,7 @@ try {
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
-                            <TextBlock Text="BATTERY ETA"
+                            <TextBlock x:Name="BatteryEtaTitleText" Text="BATTERY ETA"
                                        Foreground="#A8F5F7FB"
                                        FontFamily="Bahnschrift SemiBold"
                                        FontSize="11"/>
@@ -4028,7 +5847,9 @@ try {
         'TitleStack',
         'SubtitleText',
         'CompactButton',
+        'SettingsButton',
         'PinButton',
+        'LanguageButton',
         'SidebarButton',
         'CloseButton',
         'DockHandleButton',
@@ -4037,6 +5858,7 @@ try {
         'InternetText',
         'NetworkSpeedBadge',
         'TdpControlPanel',
+        'TdpControlTitleText',
         'TdpCurrentText',
         'TdpStatusText',
         'TdpPreset6Button',
@@ -4047,16 +5869,54 @@ try {
         'ModesToggleButton',
         'ModesSummaryText',
         'TdpCustomPanel',
+        'TdpCustomTitleText',
         'TdpCustomSlider',
         'TdpCustomValueText',
         'TdpCustomApplyButton',
+        'TdpPowerProfilePanel',
+        'TdpPowerStateText',
+        'TdpPowerDetailGrid',
+        'UnifyAcDcTdpCheckBox',
+        'TdpAcSlider',
+        'TdpDcSlider',
+        'TdpAcValueText',
+        'TdpDcValueText',
+        'TdpApplyActiveProfileButton',
+        'ProfileManagerPanel',
+        'ProfileComboBox',
+        'ProfileNewButton',
+        'ProfileSaveButton',
+        'ProfileLoadButton',
+        'ProfileDelButton',
+        'ProfileResetButton',
+        'ChargeLimitPanel',
+        'ChargeLimitTitleText',
+        'ChargeLimitOffButton',
+        'ChargeLimit80Button',
+        'ChargeLimit90Button',
+        'ChargeLimit95Button',
+        'ChargeLimitStatusText',
+        'GyroSectionSeparator',
+        'GyroPanel',
+        'GyroTitleText',
+        'GyroAvailableBadge',
+        'GyroAvailableText',
+        'GyroOffButton',
+        'GyroOnButton',
+        'GyroStatusText',
+        'FanSectionSeparator',
+        'FanPanelHeaderGrid',
+        'FanProfileTitleText',
         'ModesPanel',
+        'FpsLimiterTitleText',
+        'RefreshRateTitleText',
         'FpsCurrentText',
         'FpsOffButton',
         'Fps30Button',
         'Fps45Button',
         'Fps60Button',
         'FpsStatusText',
+        'FanOffButton',
         'FanLowButton',
         'FanMediumButton',
         'FanAutoButton',
@@ -4084,12 +5944,17 @@ try {
         'TdpMetaText',
         'CpuGpuText',
         'TdpSpark',
+        'CpuPowerCard',
         'DrainValueText',
         'DrainLabelText',
         'DrainSpark',
+        'PowerFlowTitleText',
+        'PowerFlowCard',
         'BatteryText',
         'EtaText',
         'BatteryMetaText',
+        'BatteryEtaTitleText',
+        'BatteryEtaCard',
         'CompactCpuValueText',
         'CompactCpuMetaText',
         'CompactDrainValueText',
@@ -4108,11 +5973,21 @@ try {
     $drainHistory = New-Object 'System.Collections.Generic.List[Double]'
     $script:isPinned = [bool]$script:appConfig.IsPinned
 
+    Reorder-TdpCustomPanel -NamedElements $namedElements
+    Apply-UiLanguage -NamedElements $namedElements
     Set-WindowIcon -Window $window
     Apply-WindowPlacement -Window $window -Config $script:appConfig
     Set-PinVisual -Window $window -NamedElements $namedElements -IsPinned $script:isPinned
     Set-CompactMode -Window $window -NamedElements $namedElements -IsCompact ([bool]$script:appConfig.IsCompact)
-    Set-EdgeSidebarMode -Window $window -NamedElements $namedElements -Enabled ([bool]$script:edgeDockState.Enabled)
+    Set-EdgeSidebarMode -Window $window -NamedElements $namedElements -Enabled $false
+    if ($namedElements.ContainsKey('SidebarButton') -and $namedElements.SidebarButton) {
+        $namedElements.SidebarButton.Visibility = 'Collapsed'
+        $namedElements.SidebarButton.IsEnabled = $false
+    }
+    if ($namedElements.ContainsKey('DockHandleButton') -and $namedElements.DockHandleButton) {
+        $namedElements.DockHandleButton.Visibility = 'Collapsed'
+        $namedElements.DockHandleButton.IsEnabled = $false
+    }
 
     $notifyIcon = New-Object System.Windows.Forms.NotifyIcon
     $notifyIcon.Icon = Get-AppNotifyIcon
@@ -4123,8 +5998,7 @@ try {
     $showHideMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem 'Show now'
     $compactMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem 'Compact mode'
     $compactMenuItem.CheckOnClick = $true
-    $sidebarMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem 'Right sidebar mode'
-    $sidebarMenuItem.CheckOnClick = $true
+    $sidebarMenuItem = $null
     $recoverWindowMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem 'Recover window (safe mode)'
     $notificationMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem 'Desktop internet alerts'
     $notificationMenuItem.CheckOnClick = $true
@@ -4134,7 +6008,6 @@ try {
 
     [void]$trayMenu.Items.Add($showHideMenuItem)
     [void]$trayMenu.Items.Add($compactMenuItem)
-    [void]$trayMenu.Items.Add($sidebarMenuItem)
     [void]$trayMenu.Items.Add($recoverWindowMenuItem)
     [void]$trayMenu.Items.Add($notificationMenuItem)
     [void]$trayMenu.Items.Add($startupMenuItem)
@@ -4146,17 +6019,36 @@ try {
     Refresh-PerformanceState -Force | Out-Null
     Refresh-FanState -Force | Out-Null
     Refresh-RefreshRateState -Force | Out-Null
+    Refresh-GyroState -Force | Out-Null
+    # Charge limit guard feature disabled by request.
     if ($namedElements.ContainsKey('TdpCustomSlider') -and $namedElements.TdpCustomSlider) {
         $namedElements.TdpCustomSlider.Minimum = [double]$script:tdpCustomRange.MinW
         $namedElements.TdpCustomSlider.Maximum = [double]$script:tdpCustomRange.MaxW
         $namedElements.TdpCustomSlider.Value = [double]$script:appConfig.TdpCustomW
+    }
+    if ($namedElements.ContainsKey('TdpAcSlider') -and $namedElements.TdpAcSlider) {
+        $namedElements.TdpAcSlider.Minimum = [double]$script:tdpCustomRange.MinW
+        $namedElements.TdpAcSlider.Maximum = [double]$script:tdpCustomRange.MaxW
+        $namedElements.TdpAcSlider.Value = [double]$script:appConfig.TdpAcW
+    }
+    if ($namedElements.ContainsKey('TdpDcSlider') -and $namedElements.TdpDcSlider) {
+        $namedElements.TdpDcSlider.Minimum = [double]$script:tdpCustomRange.MinW
+        $namedElements.TdpDcSlider.Maximum = [double]$script:tdpCustomRange.MaxW
+        $namedElements.TdpDcSlider.Value = [double]$script:appConfig.TdpDcW
     }
     Set-TdpCustomPanelState -NamedElements $namedElements -IsVisible ([bool]$script:appConfig.ShowTdpCustomPanel)
     Set-ModesPanelState -NamedElements $namedElements -IsVisible ([bool]$script:appConfig.ShowModesPanel)
     Update-TdpControlsUi -NamedElements $namedElements -Snapshot $initialSnapshot
 
     $applyTdpPresetAction = {
-        param([int]$Watts)
+        param(
+            [int]$Watts,
+            [ValidateSet('Auto', 'AC', 'DC')]
+            [string]$ProfileMode = 'Auto'
+        )
+        $snapshotBeforeApply = Get-PowerSnapshot -Computer $computer
+        Set-TdpProfileValue -Watts $Watts -Snapshot $snapshotBeforeApply -ProfileMode $ProfileMode
+        Save-AppConfig
         $result = Invoke-TdpPreset -Watts $Watts
         $snapshotAfterApply = Get-PowerSnapshot -Computer $computer
         Refresh-FanState | Out-Null
@@ -4198,6 +6090,42 @@ try {
         }
     }
 
+    $setChargeLimitAction = {
+        param([int]$LimitPercent)
+        if (-not $script:appConfig) {
+            return
+        }
+
+        $normalized = Normalize-ChargeLimitPercent -Value $LimitPercent -Fallback 0
+        $script:appConfig.EnableChargeLimitGuard = $true
+        $script:appConfig.ChargeLimitPercent = $normalized
+        if ($normalized -le 0) {
+            $script:chargeLimitState.AlertedForCurrentCycle = $false
+            $script:chargeLimitState.LastStatusMessage = 'Charge limit off'
+        } else {
+            $script:chargeLimitState.AlertedForCurrentCycle = $false
+            $script:chargeLimitState.LastStatusMessage = ('Charge guard set to {0}%' -f $normalized)
+        }
+        Save-AppConfig
+        $snapshotNow = Get-PowerSnapshot -Computer $computer
+        Update-ChargeLimitGuard -Snapshot $snapshotNow -NotifyIcon $notifyIcon
+        Update-TdpControlsUi -NamedElements $namedElements -Snapshot $snapshotNow
+    }
+
+    $setGyroAction = {
+        param([bool]$Enabled)
+        $result = Invoke-GyroToggle -Enabled $Enabled
+        Save-AppConfig
+        $snapshotNow = Get-PowerSnapshot -Computer $computer
+        Update-TdpControlsUi -NamedElements $namedElements -Snapshot $snapshotNow
+        if (-not $result.Success) {
+            try {
+                $notifyIcon.ShowBalloonTip(2600, 'System Monitor', $result.Message, [System.Windows.Forms.ToolTipIcon]::Info)
+            } catch {
+            }
+        }
+    }
+
     $window.Add_MouseLeftButtonDown({
         param($sender, $e)
 
@@ -4211,65 +6139,41 @@ try {
             $source = [System.Windows.Media.VisualTreeHelper]::GetParent($source)
         }
 
-        if ($script:edgeDockState.Enabled) {
-            Set-EdgeDockActivity
-            if ($script:edgeDockState.Hidden) {
-                Show-EdgeDockWidget -Window $window -Animate -ActivateWindow
-                Update-EdgeControlsUi -NamedElements $namedElements
-                return
-            }
-        }
-
         try {
-            $script:edgeDockState.IsDragging = $true
             $window.DragMove()
             Save-AppState -Window $window
         } catch {
         } finally {
-            $script:edgeDockState.IsDragging = $false
         }
     })
 
     $namedElements.CloseButton.Add_Click({
-        Hide-MainWindow -Window $window
-        Update-TrayMenu -Window $window -ShowHideMenuItem $showHideMenuItem -CompactMenuItem $compactMenuItem -NotificationMenuItem $notificationMenuItem -StartupMenuItem $startupMenuItem -SidebarMenuItem $sidebarMenuItem
+        Exit-WidgetApplication -Window $window
     })
     $namedElements.PinButton.Add_Click({
         Set-PinVisual -Window $window -NamedElements $namedElements -IsPinned (-not $script:isPinned)
         Save-AppState -Window $window
     })
-    $namedElements.SidebarButton.Add_Click({
-        Set-EdgeSidebarMode -Window $window -NamedElements $namedElements -Enabled (-not [bool]$script:edgeDockState.Enabled)
-        if ($script:edgeDockState.Enabled) {
-            Ensure-MainWindowVisible -Window $window -NamedElements $namedElements
-        }
-        Save-AppState -Window $window
-        Update-TrayMenu -Window $window -ShowHideMenuItem $showHideMenuItem -CompactMenuItem $compactMenuItem -NotificationMenuItem $notificationMenuItem -StartupMenuItem $startupMenuItem -SidebarMenuItem $sidebarMenuItem
-    })
-    $namedElements.DockHandleButton.Add_Click({
-        if (-not $script:edgeDockState.Enabled) {
+    $namedElements.LanguageButton.Add_Click({
+        if (-not $script:appConfig) {
             return
         }
-        if ($script:edgeDockState.Hidden) {
-            Show-EdgeDockWidget -Window $window -Animate -ActivateWindow
-        } else {
-            Hide-EdgeDockWidget -Window $window -Animate
-        }
-        Update-EdgeControlsUi -NamedElements $namedElements
-        Save-AppState -Window $window
-        Update-TrayMenu -Window $window -ShowHideMenuItem $showHideMenuItem -CompactMenuItem $compactMenuItem -NotificationMenuItem $notificationMenuItem -StartupMenuItem $startupMenuItem -SidebarMenuItem $sidebarMenuItem
+        $script:appConfig.UiLanguage = if ([string]$script:appConfig.UiLanguage -eq 'VIE') { 'ENG' } else { 'VIE' }
+        Save-AppConfig
+        Apply-UiLanguage -NamedElements $namedElements
+        Update-TdpControlsUi -NamedElements $namedElements -Snapshot (Get-PowerSnapshot -Computer $computer)
     })
     $namedElements.TdpPreset6Button.Add_Click({
-        & $applyTdpPresetAction 6
+        & $applyTdpPresetAction 6 'Auto'
     })
     $namedElements.TdpPreset8Button.Add_Click({
-        & $applyTdpPresetAction 8
+        & $applyTdpPresetAction 8 'Auto'
     })
     $namedElements.TdpPreset10Button.Add_Click({
-        & $applyTdpPresetAction 10
+        & $applyTdpPresetAction 10 'Auto'
     })
     $namedElements.TdpPreset12Button.Add_Click({
-        & $applyTdpPresetAction 12
+        & $applyTdpPresetAction 12 'Auto'
     })
     $namedElements.TdpCustomToggleButton.Add_Click({
         $nextVisible = -not [bool]$script:appConfig.ShowTdpCustomPanel
@@ -4296,7 +6200,158 @@ try {
     $namedElements.TdpCustomApplyButton.Add_Click({
         $selectedW = [int][Math]::Round([double]$namedElements.TdpCustomSlider.Value)
         $selectedW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, $selectedW))
-        & $applyTdpPresetAction $selectedW
+        & $applyTdpPresetAction $selectedW 'Auto'
+    })
+    $namedElements.UnifyAcDcTdpCheckBox.Add_Click({
+        if (-not $script:appConfig) {
+            return
+        }
+
+        $script:appConfig.UnifyAcDcTdp = [bool]$namedElements.UnifyAcDcTdpCheckBox.IsChecked
+        if ($script:appConfig.UnifyAcDcTdp) {
+            $script:appConfig.TdpDcW = [int]$script:appConfig.TdpAcW
+            if ($namedElements.ContainsKey('TdpDcSlider') -and $namedElements.TdpDcSlider) {
+                $namedElements.TdpDcSlider.Value = [double]$script:appConfig.TdpDcW
+            }
+        }
+        Save-AppConfig
+        Update-TdpControlsUi -NamedElements $namedElements -Snapshot (Get-PowerSnapshot -Computer $computer)
+    })
+    $namedElements.TdpAcSlider.Add_ValueChanged({
+        if (-not $script:appConfig) {
+            return
+        }
+
+        $selectedW = [int][Math]::Round([double]$namedElements.TdpAcSlider.Value)
+        $selectedW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, $selectedW))
+        $script:appConfig.TdpAcW = $selectedW
+        if ([bool]$script:appConfig.UnifyAcDcTdp) {
+            $script:appConfig.TdpDcW = $selectedW
+            if ($namedElements.ContainsKey('TdpDcSlider') -and $namedElements.TdpDcSlider) {
+                $namedElements.TdpDcSlider.Value = [double]$selectedW
+            }
+        }
+        if ($namedElements.ContainsKey('TdpAcValueText') -and $namedElements.TdpAcValueText) {
+            $namedElements.TdpAcValueText.Text = '{0}W' -f $selectedW
+        }
+        if ($namedElements.ContainsKey('TdpDcValueText') -and $namedElements.TdpDcValueText -and [bool]$script:appConfig.UnifyAcDcTdp) {
+            $namedElements.TdpDcValueText.Text = '{0}W' -f $selectedW
+        }
+    })
+    $namedElements.TdpDcSlider.Add_ValueChanged({
+        if (-not $script:appConfig) {
+            return
+        }
+        if ([bool]$script:appConfig.UnifyAcDcTdp) {
+            return
+        }
+
+        $selectedW = [int][Math]::Round([double]$namedElements.TdpDcSlider.Value)
+        $selectedW = [Math]::Max($script:tdpCustomRange.MinW, [Math]::Min($script:tdpCustomRange.MaxW, $selectedW))
+        $script:appConfig.TdpDcW = $selectedW
+        if ($namedElements.ContainsKey('TdpDcValueText') -and $namedElements.TdpDcValueText) {
+            $namedElements.TdpDcValueText.Text = '{0}W' -f $selectedW
+        }
+    })
+    $namedElements.TdpAcSlider.Add_MouseLeftButtonUp({
+        Save-AppConfig
+        Update-TdpControlsUi -NamedElements $namedElements -Snapshot (Get-PowerSnapshot -Computer $computer)
+    })
+    $namedElements.TdpDcSlider.Add_MouseLeftButtonUp({
+        Save-AppConfig
+        Update-TdpControlsUi -NamedElements $namedElements -Snapshot (Get-PowerSnapshot -Computer $computer)
+    })
+    $namedElements.TdpApplyActiveProfileButton.Add_Click({
+        $snapshotNow = Get-PowerSnapshot -Computer $computer
+        $targetW = Get-TdpTargetForPowerState -Snapshot $snapshotNow -ProfileMode 'Auto'
+        if ($null -eq $targetW) {
+            return
+        }
+        & $applyTdpPresetAction ([int]$targetW) 'Auto'
+    })
+    $namedElements.ProfileComboBox.Add_SelectionChanged({
+        if (-not $script:appConfig) {
+            return
+        }
+
+        $selectedName = [string]$namedElements.ProfileComboBox.SelectedItem
+        if ([string]::IsNullOrWhiteSpace($selectedName)) {
+            return
+        }
+        $script:appConfig.ActiveProfileName = $selectedName
+        Save-AppConfig
+    })
+    $namedElements.ProfileNewButton.Add_Click({
+        $created = New-AppProfileFromCurrentConfig
+        if ($created) {
+            Save-AppConfig
+            Update-TdpControlsUi -NamedElements $namedElements -Snapshot (Get-PowerSnapshot -Computer $computer)
+        }
+    })
+    $namedElements.ProfileSaveButton.Add_Click({
+        $selectedName = [string]$namedElements.ProfileComboBox.SelectedItem
+        if ([string]::IsNullOrWhiteSpace($selectedName)) {
+            return
+        }
+        if (Save-CurrentConfigToProfile -ProfileName $selectedName) {
+            Save-AppConfig
+            Refresh-PerformanceState -Force | Out-Null
+            Update-TdpControlsUi -NamedElements $namedElements -Snapshot (Get-PowerSnapshot -Computer $computer)
+        }
+    })
+    $namedElements.ProfileLoadButton.Add_Click({
+        $selectedName = [string]$namedElements.ProfileComboBox.SelectedItem
+        if ([string]::IsNullOrWhiteSpace($selectedName)) {
+            return
+        }
+        if (Load-ProfileToCurrentConfig -ProfileName $selectedName) {
+            Save-AppConfig
+            Refresh-PerformanceState -Force | Out-Null
+            Update-TdpControlsUi -NamedElements $namedElements -Snapshot (Get-PowerSnapshot -Computer $computer)
+        }
+    })
+    $namedElements.ProfileDelButton.Add_Click({
+        $selectedName = [string]$namedElements.ProfileComboBox.SelectedItem
+        if ([string]::IsNullOrWhiteSpace($selectedName)) {
+            return
+        }
+        if (Remove-AppProfileByName -ProfileName $selectedName) {
+            Save-AppConfig
+            Update-TdpControlsUi -NamedElements $namedElements -Snapshot (Get-PowerSnapshot -Computer $computer)
+        } else {
+            try {
+                $notifyIcon.ShowBalloonTip(2600, 'System Monitor', 'Cannot delete the last profile.', [System.Windows.Forms.ToolTipIcon]::Info)
+            } catch {
+            }
+        }
+    })
+    $namedElements.ProfileResetButton.Add_Click({
+        $selectedName = [string]$namedElements.ProfileComboBox.SelectedItem
+        if ([string]::IsNullOrWhiteSpace($selectedName)) {
+            return
+        }
+        if (Reset-ProfileToDefaultValues -ProfileName $selectedName) {
+            Save-AppConfig
+            Update-TdpControlsUi -NamedElements $namedElements -Snapshot (Get-PowerSnapshot -Computer $computer)
+        }
+    })
+    $namedElements.ChargeLimitOffButton.Add_Click({
+        & $setChargeLimitAction 0
+    })
+    $namedElements.ChargeLimit80Button.Add_Click({
+        & $setChargeLimitAction 80
+    })
+    $namedElements.ChargeLimit90Button.Add_Click({
+        & $setChargeLimitAction 90
+    })
+    $namedElements.ChargeLimit95Button.Add_Click({
+        & $setChargeLimitAction 95
+    })
+    $namedElements.GyroOffButton.Add_Click({
+        & $setGyroAction $false
+    })
+    $namedElements.GyroOnButton.Add_Click({
+        & $setGyroAction $true
     })
     $namedElements.FpsOffButton.Add_Click({
         if ($script:appConfig) {
@@ -4326,6 +6381,9 @@ try {
         Save-AppState -Window $window
         Update-TdpControlsUi -NamedElements $namedElements -Snapshot (Get-PowerSnapshot -Computer $computer)
     })
+    $namedElements.FanOffButton.Add_Click({
+        & $applyFanPresetAction 'Off'
+    })
     $namedElements.FanLowButton.Add_Click({
         & $applyFanPresetAction 'Low'
     })
@@ -4351,6 +6409,12 @@ try {
         Save-AppState -Window $window
         Update-TrayMenu -Window $window -ShowHideMenuItem $showHideMenuItem -CompactMenuItem $compactMenuItem -NotificationMenuItem $notificationMenuItem -StartupMenuItem $startupMenuItem -SidebarMenuItem $sidebarMenuItem
     })
+    $namedElements.SettingsButton.Add_Click({
+        $saved = Show-DisplaySettingsDialog -OwnerWindow $window
+        if ($saved) {
+            Update-TdpControlsUi -NamedElements $namedElements -Snapshot (Get-PowerSnapshot -Computer $computer)
+        }
+    })
 
     $showHideMenuItem.Add_Click({
         Ensure-MainWindowVisible -Window $window -NamedElements $namedElements
@@ -4363,14 +6427,6 @@ try {
         Update-TrayMenu -Window $window -ShowHideMenuItem $showHideMenuItem -CompactMenuItem $compactMenuItem -NotificationMenuItem $notificationMenuItem -StartupMenuItem $startupMenuItem -SidebarMenuItem $sidebarMenuItem
     })
 
-    $sidebarMenuItem.Add_Click({
-        Set-EdgeSidebarMode -Window $window -NamedElements $namedElements -Enabled $sidebarMenuItem.Checked
-        if ($script:edgeDockState.Enabled) {
-            Ensure-MainWindowVisible -Window $window -NamedElements $namedElements
-        }
-        Save-AppState -Window $window
-        Update-TrayMenu -Window $window -ShowHideMenuItem $showHideMenuItem -CompactMenuItem $compactMenuItem -NotificationMenuItem $notificationMenuItem -StartupMenuItem $startupMenuItem -SidebarMenuItem $sidebarMenuItem
-    })
 
     $recoverWindowMenuItem.Add_Click({
         Recover-MainWindowPlacement -Window $window -NamedElements $namedElements
@@ -4416,14 +6472,7 @@ try {
 
     $window.Add_Closing({
         param($sender, $e)
-
-        if (-not $script:isExiting) {
-            $e.Cancel = $true
-            Hide-MainWindow -Window $window
-            Update-TrayMenu -Window $window -ShowHideMenuItem $showHideMenuItem -CompactMenuItem $compactMenuItem -NotificationMenuItem $notificationMenuItem -StartupMenuItem $startupMenuItem -SidebarMenuItem $sidebarMenuItem
-            return
-        }
-
+        $script:isExiting = $true
         Save-AppState -Window $window
     })
 
@@ -4435,6 +6484,10 @@ try {
         if ($trayMenu) {
             $trayMenu.Dispose()
         }
+    })
+
+    $window.Add_ContentRendered({
+        Ensure-MainWindowVisible -Window $window -NamedElements $namedElements
     })
 
     $window.Dispatcher.Add_UnhandledException({
@@ -4454,9 +6507,14 @@ try {
         try {
             $snapshot = Get-PowerSnapshot -Computer $computer
             $performance = Refresh-PerformanceState
+            $autoTdpResult = Try-AutoApplyTdpProfileOnPowerChange -Snapshot $snapshot
+            if ($autoTdpResult -and $autoTdpResult.Success) {
+                $performance = Refresh-PerformanceState -Force
+            }
             Enforce-FanManualHold | Out-Null
             Refresh-FanState | Out-Null
             Refresh-RefreshRateState | Out-Null
+            Refresh-GyroState | Out-Null
             Update-TdpControlsUi -NamedElements $namedElements -Snapshot $snapshot
 
             Add-HistoryPoint -History $tdpHistory -Value $snapshot.CpuRealtimeW
@@ -4494,36 +6552,41 @@ try {
                 '--'
             }
             $namedElements.DrainLabelText.Text = if ($null -ne $snapshot.BatteryRateRawW) {
-                '{0} | {1}' -f $snapshot.DrainLabel, $snapshot.PowerLineStatus
+                '{0} | {1}' -f (Translate-UiRuntimeText -Text $snapshot.DrainLabel), (Translate-UiRuntimeText -Text $snapshot.PowerLineStatus)
             } else {
-                'Battery power sensor unavailable'
+                if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Không có cảm biến công suất pin' } else { 'Battery power sensor unavailable' }
             }
             $namedElements.CompactDrainValueText.Text = $namedElements.DrainValueText.Text
             $namedElements.CompactDrainLabelText.Text = if ($null -ne $snapshot.BatteryRateRawW) {
-                $snapshot.DrainLabel
+                Translate-UiRuntimeText -Text $snapshot.DrainLabel
             } else {
-                'Sensor unavailable'
+                if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Không có cảm biến' } else { 'Sensor unavailable' }
             }
 
             $namedElements.BatteryText.Text = if ($null -ne $snapshot.BatteryLevel) {
-                '{0:N0}% battery | {1} left' -f $snapshot.BatteryLevel, (Format-Number -Value $snapshot.RemainingCapacityWh -Unit 'Wh')
+                if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') {
+                    '{0:N0}% pin | còn {1}' -f $snapshot.BatteryLevel, (Format-Number -Value $snapshot.RemainingCapacityWh -Unit 'Wh')
+                } else {
+                    '{0:N0}% battery | {1} left' -f $snapshot.BatteryLevel, (Format-Number -Value $snapshot.RemainingCapacityWh -Unit 'Wh')
+                }
             } else {
-                'Battery level unavailable'
+                if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Không đọc được mức pin' } else { 'Battery level unavailable' }
             }
 
             $namedElements.EtaText.Text = switch ($snapshot.BatteryEtaStatus) {
-                'Discharging' { 'Empty ~ ' + (Format-Duration -TotalSeconds $snapshot.BatteryEtaSeconds) }
-                'Charging' { 'Full in ' + (Format-Duration -TotalSeconds $snapshot.BatteryEtaSeconds) }
-                'Plugged in' { 'Plugged in' }
-                'Estimating' { 'Estimating...' }
-                default { 'ETA unavailable' }
+                'Discharging' { if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Cạn sau ~ ' + (Format-Duration -TotalSeconds $snapshot.BatteryEtaSeconds) } else { 'Empty ~ ' + (Format-Duration -TotalSeconds $snapshot.BatteryEtaSeconds) } }
+                'Charging' { if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Đầy sau ' + (Format-Duration -TotalSeconds $snapshot.BatteryEtaSeconds) } else { 'Full in ' + (Format-Duration -TotalSeconds $snapshot.BatteryEtaSeconds) } }
+                'Plugged in' { if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Đang cắm sạc' } else { 'Plugged in' } }
+                'Estimating' { if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Đang ước tính...' } else { 'Estimating...' } }
+                default { if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Không có ETA' } else { 'ETA unavailable' } }
             }
             $namedElements.CompactEtaText.Text = $namedElements.EtaText.Text
             $namedElements.CompactBatteryText.Text = $namedElements.BatteryText.Text
 
             $voltText = if ($null -ne $snapshot.BatteryVoltageV) { Format-Number -Value $snapshot.BatteryVoltageV -Unit 'V' } else { 'N/A' }
             $currentText = if ($null -ne $snapshot.BatteryCurrentA) { Format-Number -Value $snapshot.BatteryCurrentA -Unit 'A' } else { 'N/A' }
-            $fullText = if ($null -ne $snapshot.FullCapacityWh) { Format-Number -Value $snapshot.FullCapacityWh -Unit 'Wh full' } else { 'full cap N/A' }
+            $fullUnit = if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Wh đầy' } else { 'Wh full' }
+            $fullText = if ($null -ne $snapshot.FullCapacityWh) { Format-Number -Value $snapshot.FullCapacityWh -Unit $fullUnit } else { if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'không rõ dung lượng đầy' } else { 'full cap N/A' } }
             $namedElements.BatteryMetaText.Text = '{0} | {1} | {2}' -f $voltText, $currentText, $fullText
             $namedElements.CompactBatteryLevelText.Text = if ($null -ne $snapshot.BatteryLevel) {
                 '{0:N0}%' -f $snapshot.BatteryLevel
@@ -4531,23 +6594,26 @@ try {
                 '--'
             }
             $namedElements.CompactBatteryMetaText.Text = if ($null -ne $snapshot.RemainingCapacityWh) {
-                Format-Number -Value $snapshot.RemainingCapacityWh -Unit 'Wh left'
+                $remainingUnit = if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Wh còn lại' } else { 'Wh left' }
+                Format-Number -Value $snapshot.RemainingCapacityWh -Unit $remainingUnit
             } else {
-                'Battery data unavailable'
+                if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Không có dữ liệu pin' } else { 'Battery data unavailable' }
             }
 
-            $namedElements.InternetText.Text = $snapshot.InternetStatus
+            $namedElements.InternetText.Text = Translate-UiRuntimeText -Text $snapshot.InternetStatus
             $namedElements.InternetDot.Fill = if ($snapshot.InternetOnline) { New-Brush '#FF58D68D' } else { New-Brush '#FFFF6B6B' }
             $namedElements.InternetBadge.Background = if ($snapshot.InternetOnline) { New-Brush '#1427D799' } else { New-Brush '#14D64545' }
             $namedElements.InternetBadge.BorderBrush = if ($snapshot.InternetOnline) { New-Brush '#2AFFFFFF' } else { New-Brush '#33FFB3B3' }
             $namedElements.DownloadSpeedText.Text = Format-DataRate -BytesPerSecond $snapshot.DownloadBps
             $namedElements.UploadSpeedText.Text = Format-DataRate -BytesPerSecond $snapshot.UploadBps
             $namedElements.NetworkNameText.Text = if ($snapshot.InternetOnline) { $snapshot.InternetDetail } else { Get-OfflineDurationText -OfflineSince $snapshot.InternetOfflineSince }
-            $namedElements.NetworkSpeedBadge.ToolTip = 'Adapter: ' + $snapshot.NetworkInterface
+            $adapterLabel = if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Bộ điều hợp: ' } else { 'Adapter: ' }
+            $namedElements.NetworkSpeedBadge.ToolTip = $adapterLabel + $snapshot.NetworkInterface
             Update-InternetAlertState -Snapshot $snapshot -NamedElements $namedElements -NotifyIcon $notifyIcon
+            # Charge limit guard feature disabled by request.
 
-            $namedElements.UpdatedText.Text = 'Updated ' + $snapshot.Timestamp.ToString('HH:mm:ss')
-            $namedElements.SourceText.Text = 'Data: {0}' -f $snapshot.SensorSource
+            $namedElements.UpdatedText.Text = (Get-UiText -Key 'Updated') + ' ' + $snapshot.Timestamp.ToString('HH:mm:ss')
+            $namedElements.SourceText.Text = ('{0}: {1}' -f (Get-UiText -Key 'DataSource'), $snapshot.SensorSource)
 
             Update-Sparkline -Canvas $namedElements.TdpSpark -History $tdpHistory -StrokeColor '#FFF2FAFF' -FillColor '#2CF2FAFF'
             Update-Sparkline -Canvas $namedElements.DrainSpark -History $drainHistory -StrokeColor '#FFFFC857' -FillColor '#22FFC857'
@@ -4556,10 +6622,10 @@ try {
             Write-RuntimeLog -Message ('RenderFrameError: ' + $errText)
             try {
                 if ($namedElements -and $namedElements.ContainsKey('SourceText') -and $namedElements.SourceText) {
-                    $namedElements.SourceText.Text = 'Recovered after runtime error'
+                    $namedElements.SourceText.Text = if ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE') { 'Da phuc hoi sau loi runtime' } else { 'Recovered after runtime error' }
                 }
                 if ($namedElements -and $namedElements.ContainsKey('UpdatedText') -and $namedElements.UpdatedText) {
-                    $namedElements.UpdatedText.Text = 'Updated ' + (Get-Date).ToString('HH:mm:ss')
+                    $namedElements.UpdatedText.Text = (Get-UiText -Key 'Updated') + ' ' + (Get-Date).ToString('HH:mm:ss')
                 }
             } catch {
             }

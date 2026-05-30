@@ -40,3 +40,25 @@
 ---
 
 *ISSUE_LOG.md - Cập nhật gần nhất: 2026-04-28*
+
+---
+
+## 2026-05-29
+
+### Fan control chưa ổn định trên GPD Win Mini 7840U
+
+- **Mô tả:** Chủ dự án test các bản mới nhất và báo quạt vẫn không chạy ổn định. UI có lúc báo đã apply `Max`, `pwm 244`, nhưng RPM vẫn `0 rpm`.
+- **File liên quan:** `TdpDrainWidget.ps1`, vùng fan EC control và `Enforce-FanManualHold`.
+- **Backend hiện tại:** App chạy độc lập, dùng `amd\inpoutx64.dll` để đọc/ghi EC, không mượn Handheld Companion để điều khiển fan.
+- **Đã thử:** Tách `Off` khỏi `Low`, tăng PWM Low/Medium/Max, giữ manual mode liên tục, thêm kickstart pulse khi RPM bằng 0.
+- **Nhận định:** Có thể map EC/PWM chưa đủ cho GPD Win Mini 7840U, hoặc còn thiếu thanh ghi bật manual fan/enable fan controller. Cần so sánh EC state với Handheld Companion vì app đó từng điều khiển fan được trên máy này.
+- **Status:** Open, ưu tiên cao.
+- **Bước tiếp theo đề xuất:** Viết diagnostic dump EC quanh `0x0470-0x048F` trước/sau khi Handheld Companion chỉnh fan, hoặc tìm source/config Handheld Companion/NBFC/Linux GPD fan để xác nhận register đúng.
+
+---
+
+### Charge limit không phải tính năng thật
+
+- **Mô tả:** Chủ dự án hỏi giới hạn sạc 80/90/95 có ngắt sạc thật không. Hiện chưa có cơ chế BIOS/EC ổn định cho GPD Win Mini 7840U để set charge threshold thật.
+- **Kết luận:** Cảnh báo phần mềm không đủ giá trị, nên tính năng này đã được tắt/ẩn khỏi hướng sản phẩm.
+- **Status:** Closed/Removed.

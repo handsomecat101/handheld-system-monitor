@@ -1,5 +1,6 @@
 param(
-    [string]$OutputPath = (Join-Path $PSScriptRoot '..\dist\SystemMonitor.exe')
+    [string]$OutputPath = (Join-Path $PSScriptRoot '..\dist\SystemMonitor.exe'),
+    [string]$Version = '1.0.0.0'
 )
 
 Set-StrictMode -Version Latest
@@ -37,7 +38,7 @@ Invoke-ps2exe `
     -description 'Desktop system monitor widget' `
     -company 'Open Source' `
     -product 'System Monitor' `
-    -version '1.0.0.0' `
+    -version $Version `
     -noConsole `
     -STA `
     -DPIAware
