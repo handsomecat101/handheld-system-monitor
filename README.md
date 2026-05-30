@@ -1,6 +1,6 @@
 ﻿# System Monitor Widget for GPD Win Mini
 
-A lightweight Windows desktop widget for monitoring and quick handheld controls. The app is built with PowerShell + WPF and is tuned around the **GPD Win Mini Ryzen 7 7840U** workflow: small screen, quick TDP changes, fan mode buttons, battery/power awareness, and simple status cards while gaming.
+A lightweight Windows desktop widget for monitoring and quick handheld controls. The app is built with PowerShell + WPF and has been tested on **GPD Win Mini Ryzen 7 7840U**. It is designed for the GPD handheld workflow: small screen, quick TDP changes, fan mode buttons, battery/power awareness, and simple status cards while gaming.
 
 ![System Monitor Widget for GPD Win Mini](docs/images/gpd-win-mini-hero.png)
 
@@ -25,9 +25,19 @@ Use the ZIP if you want the app to run correctly right away, because it includes
 - Includes compact/full view, pin toggle, display settings, and ENG/VIE language switch.
 - Can be launched as a normal local Windows app without Motion Assistant.
 
-## GPD Win Mini Focus
+## Compatibility
 
-This project is intended as a practical replacement-style widget for GPD Win Mini users when the stock Motion Assistant workflow is not convenient or not working well.
+Tested device:
+
+- GPD Win Mini with AMD Ryzen 7 7840U
+
+Expected compatible devices:
+
+- Other GPD handhelds using AMD Ryzen 7840U or 8840U platforms may work because they share a similar AMD handheld power-control stack.
+- TDP and sensor monitoring are more likely to be portable than fan control.
+- Fan control depends on the exact EC register mapping of each device, so it should be treated as experimental outside the tested Win Mini.
+
+This project is intended as a practical replacement-style widget for GPD handheld users when the stock Motion Assistant workflow is not convenient or not working well.
 
 Best-fit use cases:
 
@@ -126,8 +136,6 @@ When testing on a GPD Win Mini or another handheld, please report:
 ## Documentation
 
 - Vietnamese user guide: `docs/GUIDE_GPD_WIN_MINI_VI.md`
-- Current handoff/state for future agents: `agent team/HANDOFF_CURRENT.md`
-- GPD replacement roadmap: `agent team/ROADMAP_GPD_WIN_MINI_REPLACEMENT.md`
 
 ## Safety Notes
 

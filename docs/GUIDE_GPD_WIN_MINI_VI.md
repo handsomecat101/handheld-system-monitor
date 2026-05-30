@@ -4,7 +4,14 @@
 
 ## Giới thiệu nhanh
 
-System Monitor Widget là công cụ monitor và điều khiển nhanh cho Windows handheld, tập trung vào **GPD Win Mini Ryzen 7 7840U**. App giúp xem nhanh điện năng CPU, nhiệt độ, pin, mạng, TDP và một số chế độ handheld ngay trong một cửa sổ nhỏ.
+System Monitor Widget là công cụ monitor và điều khiển nhanh cho Windows handheld. App đã được thử nghiệm trên **GPD Win Mini Ryzen 7 7840U** và được thiết kế theo nhu cầu dùng máy GPD màn hình nhỏ: xem nhanh điện năng CPU, nhiệt độ, pin, mạng, TDP và một số chế độ handheld ngay trong một cửa sổ nhỏ.
+
+Khả năng tương thích dự kiến:
+
+- Đã thử nghiệm trực tiếp trên GPD Win Mini dùng Ryzen 7 7840U.
+- Có thể tương thích với các máy GPD khác dùng nền tảng AMD Ryzen 7840U hoặc 8840U.
+- TDP và monitor cảm biến thường dễ tương thích hơn fan control.
+- Fan control phụ thuộc EC của từng máy, nên vẫn cần test riêng trên từng model.
 
 ## Điểm mạnh hiện tại
 
@@ -86,4 +93,4 @@ Khi gửi lỗi, nên kèm:
 
 ## Mục tiêu dự án
 
-Mục tiêu là tạo một widget nhẹ, dễ dùng, tương thích cao với GPD Win Mini, đủ tốt để chia sẻ cho bạn bè test và cập nhật dần qua từng bản hotfix.
+Mục tiêu là tạo một widget nhẹ, dễ dùng, đã thử nghiệm trên GPD Win Mini và có khả năng tương thích với các thiết bị GPD dùng Ryzen 7840U/8840U, đủ tốt để chia sẻ cho bạn bè test và cập nhật dần qua từng bản hotfix.
