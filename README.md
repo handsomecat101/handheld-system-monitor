@@ -2,7 +2,19 @@
 
 A lightweight Windows desktop widget for monitoring and quick handheld controls. The app is built with PowerShell + WPF and is tuned around the **GPD Win Mini Ryzen 7 7840U** workflow: small screen, quick TDP changes, fan mode buttons, battery/power awareness, and simple status cards while gaming.
 
-![System Monitor Widget screenshot](docs/images/system-monitor-widget-current.png)
+![System Monitor Widget for GPD Win Mini](docs/images/gpd-win-mini-hero.png)
+
+## Download
+
+Recommended download for testers:
+
+[Download SystemMonitor-hotfix38.zip](https://github.com/handsomecat101/handheld-system-monitor/raw/next/releases/SystemMonitor-hotfix38.zip)
+
+Direct EXE only:
+
+[Download SystemMonitor.exe](https://github.com/handsomecat101/handheld-system-monitor/raw/next/dist-hotfix38/SystemMonitor.exe)
+
+Use the ZIP if you want the app to run correctly right away, because it includes the required `amd/` runtime files next to the EXE.
 
 ## What It Does
 

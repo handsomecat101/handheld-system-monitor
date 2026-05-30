@@ -1,6 +1,6 @@
 ﻿# Hướng dẫn sử dụng - System Monitor Widget cho GPD Win Mini
 
-![System Monitor Widget](images/system-monitor-widget-current.png)
+![System Monitor Widget cho GPD Win Mini](images/gpd-win-mini-hero.png)
 
 ## Giới thiệu nhanh
 
@@ -20,9 +20,15 @@ System Monitor Widget là công cụ monitor và điều khiển nhanh cho Windo
 
 Cách khuyên dùng cho người test:
 
-1. Mở thư mục project.
-2. Double click `Launch-TdpDrainWidget.cmd`.
-3. Launcher sẽ tự mở bản mới nhất, hiện tại là `dist-hotfix38\SystemMonitor.exe`.
+1. Tải file ZIP đầy đủ: `releases/SystemMonitor-hotfix38.zip`.
+2. Giải nén ra một thư mục bình thường.
+3. Double click `SystemMonitor.exe`.
+4. Nếu TDP/Fan không hoạt động, thử chạy bằng quyền Administrator.
+
+Link tải trực tiếp:
+
+- ZIP đầy đủ: `https://github.com/handsomecat101/handheld-system-monitor/raw/next/releases/SystemMonitor-hotfix38.zip`
+- EXE riêng: `https://github.com/handsomecat101/handheld-system-monitor/raw/next/dist-hotfix38/SystemMonitor.exe`
 
 Chạy từ source:
 
