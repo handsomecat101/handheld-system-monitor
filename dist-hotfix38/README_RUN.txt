@@ -1,15 +1,15 @@
 ﻿System Monitor Widget - hotfix38
 
-Recommended way to run:
-1. Extract this ZIP to a normal folder.
-2. Double-click Run-SystemMonitor-Admin.cmd.
-3. Windows will ask for Administrator permission.
+Cách chạy khuyên dùng:
+1. Giải nén file ZIP này ra một thư mục bình thường.
+2. Double click Run-SystemMonitor-Admin.cmd.
+3. Khi Windows hỏi quyền Administrator, bấm Yes.
 
-Important:
-TDP control needs Administrator permission. If you run SystemMonitor.exe without Administrator permission, monitoring may still open, but TDP control may not work.
+Quan trọng:
+Cần chạy quyền Administrator để điều khiển TDP. Nếu chỉ chạy SystemMonitor.exe không có quyền Admin, giao diện monitor có thể vẫn mở, nhưng chỉnh TDP có thể không hoạt động.
 
-Alternative:
+Cách chạy thay thế:
 Right-click SystemMonitor.exe > Run as administrator.
 
-Known issue:
-Fan control is experimental on GPD Win Mini 7840U. If fan does not spin, switch fan mode back to Auto and reboot before heavy gaming.
+Lưu ý về fan:
+Fan control vẫn là tính năng thử nghiệm trên GPD Win Mini 7840U. Nếu fan không quay, chuyển về Auto và reboot trước khi chơi game nặng.

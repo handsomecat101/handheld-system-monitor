@@ -1,97 +1,81 @@
-﻿# System Monitor Widget for GPD Win Mini
+﻿# System Monitor Widget cho GPD Win Mini
 
-A lightweight Windows desktop widget for monitoring and quick handheld controls. The app is built with PowerShell + WPF and has been tested on **GPD Win Mini Ryzen 7 7840U**. It is designed for the GPD handheld workflow: small screen, quick TDP changes, fan mode buttons, battery/power awareness, and simple status cards while gaming.
+System Monitor Widget là widget Windows nhẹ để theo dõi hệ thống và chỉnh nhanh hiệu năng cho máy handheld GPD. App đã được thử nghiệm trực tiếp trên **GPD Win Mini Ryzen 7 7840U** và được thiết kế cho nhu cầu dùng màn hình nhỏ: xem CPU power, nhiệt độ, pin, mạng, TDP, gyro và fan profile ngay khi chơi game.
 
-![System Monitor Widget for GPD Win Mini](docs/images/gpd-win-mini-hero.png)
+![System Monitor Widget cho GPD Win Mini](docs/images/gpd-win-mini-hero.png)
 
-## Download
+## Tải về
 
-Recommended download for testers:
+Bản khuyên dùng cho người dùng phổ thông:
 
 [Download SystemMonitor-hotfix38.zip](https://github.com/handsomecat101/handheld-system-monitor/raw/next/releases/SystemMonitor-hotfix38.zip)
 
-How to run the ZIP package:
+Nên tải bản ZIP vì trong đó đã có đủ:
 
-1. Extract the ZIP.
-2. Double-click `Run-SystemMonitor-Admin.cmd`.
-3. Accept the Windows Administrator prompt.
+- `SystemMonitor.exe`
+- `Run-SystemMonitor-Admin.cmd`
+- thư mục `amd/` chứa runtime cần thiết
+- file hướng dẫn `README_RUN.txt`
 
-Administrator permission is required for TDP control. If you run only `SystemMonitor.exe` without Administrator permission, the monitor UI may open, but TDP control may not apply.
-
-Direct EXE only:
+Không khuyến nghị tải riêng file EXE nếu bạn không biết cách đặt kèm các file phụ. Nếu vẫn cần EXE riêng:
 
 [Download SystemMonitor.exe](https://github.com/handsomecat101/handheld-system-monitor/raw/next/dist-hotfix38/SystemMonitor.exe)
 
-Use the ZIP if you want the app to run correctly right away, because it includes the required `amd/` runtime files and the Admin launcher next to the EXE.
+## Cách chạy từng bước
 
-## What It Does
+1. Tải `SystemMonitor-hotfix38.zip`.
+2. Chuột phải vào file ZIP, chọn `Extract All...` hoặc `Giải nén tất cả`.
+3. Mở thư mục vừa giải nén.
+4. Double click `Run-SystemMonitor-Admin.cmd`.
+5. Khi Windows hỏi quyền Administrator, bấm `Yes`.
+6. App sẽ mở lên và có thể điều khiển TDP.
 
-- Shows realtime CPU package power, CPU temperature, battery state, battery ETA, network status, and upload/download speed.
-- Lets you switch TDP quickly with presets and a custom 4W-25W slider through bundled `ryzenadj`.
-- Provides fan profile buttons: `Off`, `Low`, `Medium`, `Max`, `Auto`.
-- Detects handheld gyro availability and exposes a simple `Off/On` switch in the UI.
-- Includes compact/full view, pin toggle, display settings, and ENG/VIE language switch.
-- Can be launched as a normal local Windows app without Motion Assistant.
+Quan trọng: **phải chạy quyền Administrator nếu muốn chỉnh TDP**. Nếu chỉ double click `SystemMonitor.exe` không có quyền Admin, giao diện monitor có thể vẫn mở nhưng chỉnh TDP có thể không hoạt động.
 
-## Compatibility
+## Tính năng chính
 
-Tested device:
+- Theo dõi CPU package power, nhiệt độ CPU, pin, battery ETA, mạng, tốc độ download/upload.
+- Chỉnh TDP nhanh bằng preset và slider custom 4W-25W thông qua `ryzenadj`.
+- Fan profile: `Off`, `Low`, `Medium`, `Max`, `Auto`.
+- Hiển thị gyro `Available/Unavailable` và nút `Off/On` đơn giản.
+- Có chế độ full/compact, ghim cửa sổ, cài đặt hiển thị block, chuyển ngôn ngữ ENG/VIE.
+- Chạy độc lập, không cần Motion Assistant.
 
-- GPD Win Mini with AMD Ryzen 7 7840U
+## Tương thích
 
-Expected compatible devices:
+Đã thử nghiệm:
 
-- Other GPD handhelds using AMD Ryzen 7840U or 8840U platforms may work because they share a similar AMD handheld power-control stack.
-- TDP and sensor monitoring are more likely to be portable than fan control.
-- Fan control depends on the exact EC register mapping of each device, so it should be treated as experimental outside the tested Win Mini.
+- GPD Win Mini dùng AMD Ryzen 7 7840U.
 
-This project is intended as a practical replacement-style widget for GPD handheld users when the stock Motion Assistant workflow is not convenient or not working well.
+Có thể tương thích:
 
-Best-fit use cases:
+- Các máy GPD khác dùng AMD Ryzen 7840U hoặc 8840U có khả năng hoạt động vì cùng nền tảng AMD handheld.
+- TDP và cảm biến hệ thống có khả năng tương thích cao hơn fan control.
+- Fan control phụ thuộc EC của từng máy nên cần test riêng trên từng model.
 
-- Quickly lower TDP for battery life.
-- Raise TDP while plugged in for games.
-- Watch battery drain and estimated runtime.
-- Keep a compact system monitor open while using a handheld screen.
-- Test fan/TDP behavior across games and firmware versions.
+## Lưu ý quan trọng về fan
 
-## Current Status
+Fan control vẫn đang là tính năng thử nghiệm trên GPD Win Mini 7840U. App có thể ghi PWM vào EC, nhưng trên máy test đã có trường hợp UI báo đã apply mà RPM vẫn là `0 rpm`.
 
-Latest local test build in this repo:
+Nếu fan không quay hoặc máy nóng bất thường:
 
-```text
-dist-hotfix38\SystemMonitor.exe
-```
+1. Chuyển fan về `Auto`.
+2. Đóng app.
+3. Reboot máy nếu cần.
+4. Không chơi game nặng khi nhiệt độ cao mà fan không quay.
 
-Recommended launcher:
+## Gửi feedback
 
-```text
-Launch-TdpDrainWidget.cmd
-```
+Khi báo lỗi, vui lòng gửi:
 
-The launcher automatically opens the newest available hotfix build, currently `dist-hotfix38`.
+- Model máy GPD đang dùng.
+- CPU là 7840U hay 8840U.
+- Đang cắm sạc hay dùng pin.
+- TDP đang set bao nhiêu W.
+- Fan đang ở mode nào và RPM hiển thị bao nhiêu.
+- Ảnh chụp app nếu UI bị lỗi.
 
-## Known Important Limitation
-
-Fan control is still being validated on the real GPD Win Mini 7840U.
-
-The app currently writes EC/PWM directly through the bundled `inpoutx64.dll`. On the test device, the UI can report that PWM was applied, but the fan may still stay at `0 rpm`. This means fan control should be treated as experimental until the EC register/mode handling is confirmed.
-
-TDP control, monitor cards, UI layout, language switching, and gyro availability display are further along than fan control.
-
-## Download / Run
-
-For testers:
-
-1. Download `SystemMonitor-hotfix38.zip`.
-2. Extract the ZIP.
-3. Double-click `Run-SystemMonitor-Admin.cmd`.
-4. Accept the Administrator prompt.
-5. If Windows blocks it, unblock the file or run it from PowerShell.
-
-TDP control requires Administrator permission because the app uses low-level hardware access.
-
-Run from source:
+## Chạy từ source cho người phát triển
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -Sta -File .\TdpDrainWidget.ps1
@@ -99,54 +83,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -File .\TdpDrainWidget.ps1
 
 ## Build EXE
 
-Install `ps2exe` first if needed:
-
-```powershell
-Install-Module ps2exe -Scope CurrentUser
-```
-
-Build a new hotfix EXE:
-
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-SystemMonitorExe.ps1 -OutputPath .\dist-hotfix39\SystemMonitor.exe -Version 1.0.39.0
 ```
 
-Runtime dependencies used by the app live in `amd/`:
-
-- `ryzenadj.exe`
-- `inpoutx64.dll`
-- `WinRing0x64.dll`
-- `WinRing0x64.sys`
-
-## Project Layout
+## Cấu trúc chính
 
 ```text
 .
-|-- amd/                         # low-level AMD/EC runtime binaries
-|-- assets/                      # icon/image assets
-|-- docs/                        # user guide and images
-|-- dist-hotfix38/               # latest local test EXE build
+|-- amd/                         # runtime AMD/EC
+|-- assets/                      # icon/image
+|-- docs/                        # hướng dẫn và ảnh
+|-- dist-hotfix38/               # bản EXE mới nhất hiện tại
+|-- releases/SystemMonitor-hotfix38.zip
 |-- scripts/Build-SystemMonitorExe.ps1
 |-- Launch-TdpDrainWidget.cmd
 |-- README.md
-`-- TdpDrainWidget.ps1           # main PowerShell/WPF app
+`-- TdpDrainWidget.ps1           # source chính
 ```
-
-## Tester Feedback Needed
-
-When testing on a GPD Win Mini or another handheld, please report:
-
-- Device model and CPU.
-- BIOS/firmware version if known.
-- Whether TDP changes apply correctly.
-- Whether fan modes actually spin the fan and report RPM.
-- Temperature behavior while gaming.
-- Screenshot of the widget if the UI clips or overlaps.
-
-## Documentation
-
-- Vietnamese user guide: `docs/GUIDE_GPD_WIN_MINI_VI.md`
-
-## Safety Notes
-
-This app touches low-level performance and EC/fan controls. Use conservative settings first. If fan control behaves incorrectly, switch back to `Auto`, close the app, or reboot before heavy gaming.

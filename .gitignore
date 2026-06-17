@@ -1,7 +1,13 @@
 SystemMonitor.config.json
+**/SystemMonitor.config.json
 dist/
 dist/*.exe
 dist/*.zip
+dist-hotfix*/
+!dist-hotfix38/
+!dist-hotfix38/**
+dist-hotfix38/SystemMonitor.config.json
+release-package/
 *.user
 *.log
 .vs/
