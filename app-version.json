@@ -1,0 +1,11 @@
+﻿{
+  "latestVersion": "1.0.39",
+  "latestBuild": "hotfix39",
+  "downloadUrl": "https://github.com/handsomecat101/handheld-system-monitor/raw/next/releases/SystemMonitor-hotfix39.zip",
+  "releaseNotesUrl": "https://github.com/handsomecat101/handheld-system-monitor/tree/next",
+  "notes": [
+    "Thêm lựa chọn bật/tắt Tần số quét màn hình trong Cài đặt hiển thị.",
+    "Thêm kiểm tra cập nhật trong app và popup khi có bản mới.",
+    "Cập nhật gói ZIP chạy bằng quyền Administrator để TDP hoạt động."
+  ]
+}

@@ -4,9 +4,9 @@ dist/
 dist/*.exe
 dist/*.zip
 dist-hotfix*/
-!dist-hotfix38/
-!dist-hotfix38/**
-dist-hotfix38/SystemMonitor.config.json
+!dist-hotfix39/
+!dist-hotfix39/**
+dist-hotfix39/SystemMonitor.config.json
 release-package/
 *.user
 *.log

@@ -38,6 +38,20 @@ if (-not (Test-Path -LiteralPath $script:logsPath)) {
 }
 $script:runtimeLogPath = Join-Path $script:logsPath 'widget-runtime.log'
 
+$script:appVersion = '1.0.39'
+$script:appBuildLabel = 'hotfix39'
+$script:updateInfoUrl = 'https://raw.githubusercontent.com/handsomecat101/handheld-system-monitor/next/app-version.json'
+$script:updateState = [PSCustomObject]@{
+    CheckedAt       = [datetime]::MinValue
+    IsChecking      = $false
+    LatestVersion   = $null
+    LatestBuild     = $null
+    DownloadUrl     = $null
+    ReleaseNotesUrl = $null
+    Message         = 'Update check idle'
+    HasUpdate       = $false
+}
+
 $script:configPath = Join-Path $script:widgetBasePath 'SystemMonitor.config.json'
 $script:appIconPath = Join-Path $script:widgetBasePath 'SystemMonitor.ico'
 if (-not (Test-Path -LiteralPath $script:appIconPath)) {
@@ -1413,9 +1427,13 @@ function Get-DefaultAppConfig {
         ShowGyroBlock    = $true
         ShowFanBlock     = $true
         ShowFpsBlock     = $true
+        ShowRefreshBlock = $true
         ShowCpuCard      = $true
         ShowPowerFlowCard = $true
         ShowBatteryCard  = $true
+        EnableUpdateCheck = $true
+        LastUpdatePromptVersion = ''
+        LastUpdateCheckAt = ''
         EnableEdgeSidebar = $false
         EdgeAutoHideSeconds = 4
         EnableInternetNotifications = $true
@@ -1508,6 +1526,9 @@ function Load-AppConfig {
             if ($loaded.PSObject.Properties.Name -contains 'ShowFpsBlock') {
                 $config.ShowFpsBlock = Convert-ToConfigBoolean -Value $loaded.ShowFpsBlock -Fallback $config.ShowFpsBlock
             }
+            if ($loaded.PSObject.Properties.Name -contains 'ShowRefreshBlock') {
+                $config.ShowRefreshBlock = Convert-ToConfigBoolean -Value $loaded.ShowRefreshBlock -Fallback $config.ShowRefreshBlock
+            }
             if ($loaded.PSObject.Properties.Name -contains 'ShowCpuCard') {
                 $config.ShowCpuCard = Convert-ToConfigBoolean -Value $loaded.ShowCpuCard -Fallback $config.ShowCpuCard
             }
@@ -1530,6 +1551,15 @@ function Load-AppConfig {
             if ($loaded.PSObject.Properties.Name -contains 'StartWithWindows') {
                 $config.StartWithWindows = Convert-ToConfigBoolean -Value $loaded.StartWithWindows -Fallback $config.StartWithWindows
             }
+            if ($loaded.PSObject.Properties.Name -contains 'EnableUpdateCheck') {
+                $config.EnableUpdateCheck = Convert-ToConfigBoolean -Value $loaded.EnableUpdateCheck -Fallback $config.EnableUpdateCheck
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'LastUpdatePromptVersion') {
+                $config.LastUpdatePromptVersion = [string]$loaded.LastUpdatePromptVersion
+            }
+            if ($loaded.PSObject.Properties.Name -contains 'LastUpdateCheckAt') {
+                $config.LastUpdateCheckAt = [string]$loaded.LastUpdateCheckAt
+            }
         } catch {
         }
     }
@@ -1551,9 +1581,11 @@ function Load-AppConfig {
     $config.ShowGyroBlock = Convert-ToConfigBoolean -Value $config.ShowGyroBlock -Fallback $true
     $config.ShowFanBlock = Convert-ToConfigBoolean -Value $config.ShowFanBlock -Fallback $true
     $config.ShowFpsBlock = Convert-ToConfigBoolean -Value $config.ShowFpsBlock -Fallback $true
+    $config.ShowRefreshBlock = Convert-ToConfigBoolean -Value $config.ShowRefreshBlock -Fallback $true
     $config.ShowCpuCard = Convert-ToConfigBoolean -Value $config.ShowCpuCard -Fallback $true
     $config.ShowPowerFlowCard = Convert-ToConfigBoolean -Value $config.ShowPowerFlowCard -Fallback $true
     $config.ShowBatteryCard = Convert-ToConfigBoolean -Value $config.ShowBatteryCard -Fallback $true
+    $config.EnableUpdateCheck = Convert-ToConfigBoolean -Value $config.EnableUpdateCheck -Fallback $true
     return $config
 }
 
@@ -1698,6 +1730,143 @@ function Save-AppConfig {
         $script:appConfig | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:configPath -Encoding UTF8
     } catch {
     }
+}
+
+function Compare-VersionString {
+    param(
+        [string]$Left,
+        [string]$Right
+    )
+
+    try {
+        $leftVersion = [version]($Left -replace '[^\d\.].*$', '')
+        $rightVersion = [version]($Right -replace '[^\d\.].*$', '')
+        return $leftVersion.CompareTo($rightVersion)
+    } catch {
+        return [string]::Compare([string]$Left, [string]$Right, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+}
+
+function Test-AppUpdate {
+    param([switch]$Force)
+
+    if ($script:updateState.IsChecking -and -not $Force) {
+        return $script:updateState
+    }
+
+    $script:updateState.IsChecking = $true
+    $script:updateState.CheckedAt = Get-Date
+    $script:updateState.Message = 'Checking for updates'
+
+    try {
+        $response = Invoke-RestMethod -Uri $script:updateInfoUrl -UseBasicParsing -TimeoutSec 8
+        $latestVersion = [string]$response.latestVersion
+        $latestBuild = [string]$response.latestBuild
+        $downloadUrl = [string]$response.downloadUrl
+        $releaseNotesUrl = [string]$response.releaseNotesUrl
+
+        if ([string]::IsNullOrWhiteSpace($latestVersion)) {
+            throw 'Missing latestVersion'
+        }
+
+        $hasUpdate = (Compare-VersionString -Left $latestVersion -Right $script:appVersion) -gt 0
+        $script:updateState.LatestVersion = $latestVersion
+        $script:updateState.LatestBuild = $latestBuild
+        $script:updateState.DownloadUrl = $downloadUrl
+        $script:updateState.ReleaseNotesUrl = $releaseNotesUrl
+        $script:updateState.HasUpdate = $hasUpdate
+        $script:updateState.Message = if ($hasUpdate) {
+            'Update available'
+        } else {
+            'You are running the latest version'
+        }
+    } catch {
+        $script:updateState.HasUpdate = $false
+        $script:updateState.Message = 'Could not check for updates'
+    } finally {
+        $script:updateState.IsChecking = $false
+        if ($script:appConfig) {
+            $script:appConfig.LastUpdateCheckAt = (Get-Date).ToString('o')
+            Save-AppConfig
+        }
+    }
+
+    return $script:updateState
+}
+
+function Show-AppUpdateResult {
+    param(
+        [System.Windows.Window]$OwnerWindow,
+        [bool]$Manual = $false
+    )
+
+    $state = $script:updateState
+    $isVie = ($script:appConfig -and [string]$script:appConfig.UiLanguage -eq 'VIE')
+
+    if ($state.HasUpdate) {
+        $title = if ($isVie) { 'Có bản cập nhật mới' } else { 'Update available' }
+        $message = if ($isVie) {
+            "Đang chạy: $($script:appVersion) ($($script:appBuildLabel))`nBản mới: $($state.LatestVersion) ($($state.LatestBuild))`n`nBạn muốn mở link tải bản ZIP mới không?"
+        } else {
+            "Current: $($script:appVersion) ($($script:appBuildLabel))`nLatest: $($state.LatestVersion) ($($state.LatestBuild))`n`nOpen the ZIP download link now?"
+        }
+        $result = [System.Windows.MessageBox]::Show($OwnerWindow, $message, $title, 'YesNo', 'Information')
+        if ($result -eq 'Yes' -and -not [string]::IsNullOrWhiteSpace($state.DownloadUrl)) {
+            Start-Process $state.DownloadUrl | Out-Null
+        }
+        if ($script:appConfig) {
+            $script:appConfig.LastUpdatePromptVersion = [string]$state.LatestVersion
+            Save-AppConfig
+        }
+        return
+    }
+
+    if ($Manual) {
+        $title = if ($isVie) { 'Kiểm tra cập nhật' } else { 'Check for updates' }
+        $message = if ($isVie) {
+            if ($state.Message -eq 'Could not check for updates') {
+                'Không kiểm tra được cập nhật. Hãy kiểm tra mạng hoặc thử lại sau.'
+            } else {
+                "Bạn đang dùng bản mới nhất: $($script:appVersion) ($($script:appBuildLabel))."
+            }
+        } else {
+            if ($state.Message -eq 'Could not check for updates') {
+                'Could not check for updates. Check your connection and try again later.'
+            } else {
+                "You are running the latest version: $($script:appVersion) ($($script:appBuildLabel))."
+            }
+        }
+        [System.Windows.MessageBox]::Show($OwnerWindow, $message, $title, 'OK', 'Information') | Out-Null
+    }
+}
+
+function Start-BackgroundUpdateCheck {
+    param([System.Windows.Window]$OwnerWindow)
+
+    if (-not $script:appConfig -or -not [bool]$script:appConfig.EnableUpdateCheck) {
+        return
+    }
+
+    try {
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:appConfig.LastUpdateCheckAt)) {
+            $lastCheck = [datetime]::Parse([string]$script:appConfig.LastUpdateCheckAt)
+            if (((Get-Date) - $lastCheck).TotalHours -lt 12) {
+                return
+            }
+        }
+    } catch {
+    }
+
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromSeconds(4)
+    $timer.Add_Tick({
+        $timer.Stop()
+        $state = Test-AppUpdate -Force
+        if ($state.HasUpdate -and $script:appConfig -and [string]$script:appConfig.LastUpdatePromptVersion -ne [string]$state.LatestVersion) {
+            Show-AppUpdateResult -OwnerWindow $OwnerWindow -Manual:$false
+        }
+    })
+    $timer.Start()
 }
 
 function Set-StartupEnabled {
@@ -3985,12 +4154,27 @@ function Update-TdpControlsUi {
             $NamedElements.FanStatusText.Visibility = if ([bool]$script:appConfig.ShowFanBlock) { 'Visible' } else { 'Collapsed' }
         }
         if ($NamedElements.ContainsKey('ModesPanel') -and $NamedElements.ModesPanel) {
-            if ([bool]$script:appConfig.ShowFpsBlock) {
+            if ([bool]$script:appConfig.ShowFpsBlock -or [bool]$script:appConfig.ShowRefreshBlock) {
                 $showModes = [bool]$script:appConfig.ShowModesPanel
                 Set-ModesPanelState -NamedElements $NamedElements -IsVisible $showModes
             } else {
                 $NamedElements.ModesPanel.Visibility = 'Collapsed'
             }
+        }
+        if ($NamedElements.ContainsKey('FpsPanel') -and $NamedElements.FpsPanel) {
+            $NamedElements.FpsPanel.Visibility = if ([bool]$script:appConfig.ShowFpsBlock) { 'Visible' } else { 'Collapsed' }
+        }
+        if ($NamedElements.ContainsKey('FpsStatusText') -and $NamedElements.FpsStatusText) {
+            $NamedElements.FpsStatusText.Visibility = if ([bool]$script:appConfig.ShowFpsBlock) { 'Visible' } else { 'Collapsed' }
+        }
+        if ($NamedElements.ContainsKey('RefreshRateSectionSeparator') -and $NamedElements.RefreshRateSectionSeparator) {
+            $NamedElements.RefreshRateSectionSeparator.Visibility = if ([bool]$script:appConfig.ShowFpsBlock -and [bool]$script:appConfig.ShowRefreshBlock) { 'Visible' } else { 'Collapsed' }
+        }
+        if ($NamedElements.ContainsKey('RefreshRatePanel') -and $NamedElements.RefreshRatePanel) {
+            $NamedElements.RefreshRatePanel.Visibility = if ([bool]$script:appConfig.ShowRefreshBlock) { 'Visible' } else { 'Collapsed' }
+        }
+        if ($NamedElements.ContainsKey('HzStatusText') -and $NamedElements.HzStatusText) {
+            $NamedElements.HzStatusText.Visibility = if ([bool]$script:appConfig.ShowRefreshBlock) { 'Visible' } else { 'Collapsed' }
         }
         if ($NamedElements.ContainsKey('CpuPowerCard') -and $NamedElements.CpuPowerCard) {
             $NamedElements.CpuPowerCard.Visibility = if ([bool]$script:appConfig.ShowCpuCard) { 'Visible' } else { 'Collapsed' }
@@ -4145,7 +4329,7 @@ function Update-TdpControlsUi {
         }
     }
 
-    if ($NamedElements.ContainsKey('ModesPanel') -and $NamedElements.ModesPanel -and $script:appConfig -and [bool]$script:appConfig.ShowFpsBlock) {
+    if ($NamedElements.ContainsKey('ModesPanel') -and $NamedElements.ModesPanel -and $script:appConfig -and ([bool]$script:appConfig.ShowFpsBlock -or [bool]$script:appConfig.ShowRefreshBlock)) {
         $showModes = [bool]$script:appConfig.ShowModesPanel
         Set-ModesPanelState -NamedElements $NamedElements -IsVisible $showModes
     }
@@ -4305,9 +4489,13 @@ function Get-UiText {
         Gyro = 'Gyro'
         FanProfile = 'Fan profile'
         FpsLimiter = 'FPS limiter'
+        RefreshRateBlock = 'Refresh rate'
         CpuPowerCard = 'CPU power card'
         PowerFlowCard = 'Power flow card'
         BatteryEtaCard = 'Battery ETA card'
+        AutoUpdateCheck = 'Check for updates automatically'
+        CheckUpdate = 'Check update'
+        VersionInfo = 'Version'
         CustomTdp = 'CUSTOM 4-25W'
         FanOff = 'Off'
         FanLow = 'Low'
@@ -4342,9 +4530,13 @@ function Get-UiText {
         Gyro = 'Gyro'
         FanProfile = 'Chế độ quạt'
         FpsLimiter = 'Giới hạn FPS'
+        RefreshRateBlock = 'Tần số quét màn hình'
         CpuPowerCard = 'Thẻ công suất CPU'
         PowerFlowCard = 'Thẻ dòng năng lượng'
         BatteryEtaCard = 'Thẻ pin còn lại'
+        AutoUpdateCheck = 'Tự kiểm tra bản cập nhật'
+        CheckUpdate = 'Kiểm tra cập nhật'
+        VersionInfo = 'Phiên bản'
         CustomTdp = 'TÙY CHỈNH 4-25W'
         FanOff = 'Tắt'
         FanLow = 'Thấp'
@@ -4411,17 +4603,22 @@ function Show-DisplaySettingsDialog {
     $labelGyro = Get-UiText -Key 'Gyro'
     $labelFan = Get-UiText -Key 'FanProfile'
     $labelFps = Get-UiText -Key 'FpsLimiter'
+    $labelRefresh = Get-UiText -Key 'RefreshRateBlock'
     $labelCpu = Get-UiText -Key 'CpuPowerCard'
     $labelFlow = Get-UiText -Key 'PowerFlowCard'
     $labelBattery = Get-UiText -Key 'BatteryEtaCard'
+    $labelAutoUpdate = Get-UiText -Key 'AutoUpdateCheck'
+    $labelCheckUpdate = Get-UiText -Key 'CheckUpdate'
+    $labelVersion = Get-UiText -Key 'VersionInfo'
     $labelCancel = Get-UiText -Key 'Cancel'
     $labelSave = Get-UiText -Key 'Save'
+    $versionText = '{0}: {1} ({2})' -f $labelVersion, $script:appVersion, $script:appBuildLabel
 
     [xml]$dialogXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Width="350"
-        Height="450"
+        Height="520"
         WindowStyle="None"
         AllowsTransparency="True"
         ResizeMode="NoResize"
@@ -4457,10 +4654,17 @@ function Show-DisplaySettingsDialog {
                 <CheckBox x:Name="ShowGyroBlockCheck" Content="$labelGyro" Margin="0,6,0,0" Foreground="#FFF5F7FB"/>
                 <CheckBox x:Name="ShowFanBlockCheck" Content="$labelFan" Margin="0,6,0,0" Foreground="#FFF5F7FB"/>
                 <CheckBox x:Name="ShowFpsBlockCheck" Content="$labelFps" Margin="0,6,0,0" Foreground="#FFF5F7FB"/>
+                <CheckBox x:Name="ShowRefreshBlockCheck" Content="$labelRefresh" Margin="0,6,0,0" Foreground="#FFF5F7FB"/>
                 <Border Margin="0,10,0,8" Height="1" Background="#28FFFFFF"/>
                 <CheckBox x:Name="ShowCpuCardCheck" Content="$labelCpu" Margin="0,2,0,0" Foreground="#FFF5F7FB"/>
                 <CheckBox x:Name="ShowPowerFlowCardCheck" Content="$labelFlow" Margin="0,6,0,0" Foreground="#FFF5F7FB"/>
                 <CheckBox x:Name="ShowBatteryCardCheck" Content="$labelBattery" Margin="0,6,0,0" Foreground="#FFF5F7FB"/>
+                <Border Margin="0,10,0,8" Height="1" Background="#28FFFFFF"/>
+                <TextBlock Text="$versionText" Foreground="#BFE4F6FF" FontFamily="Segoe UI Variable Text" FontSize="10.5"/>
+                <CheckBox x:Name="EnableUpdateCheckBox" Content="$labelAutoUpdate" Margin="0,7,0,0" Foreground="#FFF5F7FB"/>
+                <Button x:Name="CheckUpdateButton" Content="$labelCheckUpdate" Height="28" Margin="0,9,0,0"
+                        Background="#2236A3D8" BorderBrush="#5689D8FF" Foreground="#FFF7FCFF"
+                        FontFamily="Bahnschrift SemiBold" FontSize="10.2"/>
             </StackPanel>
             <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
                 <Button x:Name="CancelButton" Content="$labelCancel" Width="78" Margin="0,0,8,0"
@@ -4482,9 +4686,12 @@ function Show-DisplaySettingsDialog {
     $showGyro = $dialog.FindName('ShowGyroBlockCheck')
     $showFan = $dialog.FindName('ShowFanBlockCheck')
     $showFps = $dialog.FindName('ShowFpsBlockCheck')
+    $showRefresh = $dialog.FindName('ShowRefreshBlockCheck')
     $showCpu = $dialog.FindName('ShowCpuCardCheck')
     $showFlow = $dialog.FindName('ShowPowerFlowCardCheck')
     $showBattery = $dialog.FindName('ShowBatteryCardCheck')
+    $enableUpdate = $dialog.FindName('EnableUpdateCheckBox')
+    $checkUpdateBtn = $dialog.FindName('CheckUpdateButton')
     $cancelBtn = $dialog.FindName('CancelButton')
     $saveBtn = $dialog.FindName('SaveButton')
     $dialogCloseBtn = $dialog.FindName('DialogCloseButton')
@@ -4494,21 +4701,34 @@ function Show-DisplaySettingsDialog {
     $showGyro.IsChecked = [bool]$script:appConfig.ShowGyroBlock
     $showFan.IsChecked = [bool]$script:appConfig.ShowFanBlock
     $showFps.IsChecked = [bool]$script:appConfig.ShowFpsBlock
+    $showRefresh.IsChecked = [bool]$script:appConfig.ShowRefreshBlock
     $showCpu.IsChecked = [bool]$script:appConfig.ShowCpuCard
     $showFlow.IsChecked = [bool]$script:appConfig.ShowPowerFlowCard
     $showBattery.IsChecked = [bool]$script:appConfig.ShowBatteryCard
+    $enableUpdate.IsChecked = [bool]$script:appConfig.EnableUpdateCheck
 
     $cancelBtn.Add_Click({ $dialog.DialogResult = $false; $dialog.Close() })
     $dialogCloseBtn.Add_Click({ $dialog.DialogResult = $false; $dialog.Close() })
+    $checkUpdateBtn.Add_Click({
+        $checkUpdateBtn.IsEnabled = $false
+        try {
+            [void](Test-AppUpdate -Force)
+            Show-AppUpdateResult -OwnerWindow $dialog -Manual:$true
+        } finally {
+            $checkUpdateBtn.IsEnabled = $true
+        }
+    })
     $saveBtn.Add_Click({
         $script:appConfig.ShowTdpBlock = [bool]$showTdp.IsChecked
         $script:appConfig.ShowChargeBlock = [bool]$showCharge.IsChecked
         $script:appConfig.ShowGyroBlock = [bool]$showGyro.IsChecked
         $script:appConfig.ShowFanBlock = [bool]$showFan.IsChecked
         $script:appConfig.ShowFpsBlock = [bool]$showFps.IsChecked
+        $script:appConfig.ShowRefreshBlock = [bool]$showRefresh.IsChecked
         $script:appConfig.ShowCpuCard = [bool]$showCpu.IsChecked
         $script:appConfig.ShowPowerFlowCard = [bool]$showFlow.IsChecked
         $script:appConfig.ShowBatteryCard = [bool]$showBattery.IsChecked
+        $script:appConfig.EnableUpdateCheck = [bool]$enableUpdate.IsChecked
         Save-AppConfig
         $dialog.DialogResult = $true
         $dialog.Close()
@@ -5355,7 +5575,8 @@ try {
                     <StackPanel x:Name="ModesPanel"
                                 Margin="0,7,0,0"
                                 Visibility="Collapsed">
-                        <Grid VerticalAlignment="Center">
+                        <Grid x:Name="FpsPanel"
+                              VerticalAlignment="Center">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto"/>
                                 <ColumnDefinition Width="8"/>
@@ -5431,10 +5652,12 @@ try {
                                    FontFamily="Segoe UI Variable Text"
                                    FontSize="9.2"
                                    Text="FPS limiter off"/>
-                        <Border Margin="0,7,0,0"
+                        <Border x:Name="RefreshRateSectionSeparator"
+                                Margin="0,7,0,0"
                                 Height="1"
                                 Background="#1EFFFFFF"/>
-                        <Grid Margin="0,7,0,0"
+                        <Grid x:Name="RefreshRatePanel"
+                              Margin="0,7,0,0"
                               VerticalAlignment="Center">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto"/>
@@ -5908,7 +6131,10 @@ try {
         'FanPanelHeaderGrid',
         'FanProfileTitleText',
         'ModesPanel',
+        'FpsPanel',
         'FpsLimiterTitleText',
+        'RefreshRateSectionSeparator',
+        'RefreshRatePanel',
         'RefreshRateTitleText',
         'FpsCurrentText',
         'FpsOffButton',
@@ -6633,6 +6859,8 @@ try {
     }
 
     & $renderFrame
+
+    Start-BackgroundUpdateCheck -OwnerWindow $window
 
     $timer = New-Object System.Windows.Threading.DispatcherTimer
     $timer.Interval = [TimeSpan]::FromMilliseconds([Math]::Max($RefreshMs, 750))

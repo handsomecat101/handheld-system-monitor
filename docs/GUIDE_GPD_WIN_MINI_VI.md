@@ -27,7 +27,7 @@ Khả năng tương thích dự kiến:
 
 Cách khuyên dùng cho người test:
 
-1. Tải file ZIP đầy đủ: `releases/SystemMonitor-hotfix38.zip`.
+1. Tải file ZIP đầy đủ: `releases/SystemMonitor-hotfix39.zip`.
 2. Giải nén ra một thư mục bình thường.
 3. Double click `Run-SystemMonitor-Admin.cmd`.
 4. Bấm đồng ý khi Windows hỏi quyền Administrator.
@@ -36,8 +36,8 @@ Lưu ý quan trọng: điều khiển TDP cần quyền Administrator. Nếu ch�
 
 Link tải trực tiếp:
 
-- ZIP đầy đủ: `https://github.com/handsomecat101/handheld-system-monitor/raw/next/releases/SystemMonitor-hotfix38.zip`
-- EXE riêng: `https://github.com/handsomecat101/handheld-system-monitor/raw/next/dist-hotfix38/SystemMonitor.exe`
+- ZIP đầy đủ: `https://github.com/handsomecat101/handheld-system-monitor/raw/next/releases/SystemMonitor-hotfix39.zip`
+- EXE riêng: `https://github.com/handsomecat101/handheld-system-monitor/raw/next/dist-hotfix39/SystemMonitor.exe`
 
 Chạy từ source:
 
@@ -87,7 +87,7 @@ Nếu quạt không chạy:
 Khi gửi lỗi, nên kèm:
 
 - Ảnh chụp app.
-- Bản đang chạy, ví dụ `dist-hotfix38`.
+- Bản đang chạy, ví dụ `dist-hotfix39`.
 - Máy đang cắm sạc hay dùng pin.
 - TDP đang set bao nhiêu W.
 - Fan đang ở mode nào và RPM hiển thị bao nhiêu.

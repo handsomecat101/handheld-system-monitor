@@ -1,4 +1,4 @@
-﻿System Monitor Widget - hotfix38
+﻿System Monitor Widget - hotfix39
 
 Cách chạy khuyên dùng:
 1. Giải nén file ZIP này ra một thư mục bình thường.
@@ -8,8 +8,9 @@ Cách chạy khuyên dùng:
 Quan trọng:
 Cần chạy quyền Administrator để điều khiển TDP. Nếu chỉ chạy SystemMonitor.exe không có quyền Admin, giao diện monitor có thể vẫn mở, nhưng chỉnh TDP có thể không hoạt động.
 
-Cách chạy thay thế:
-Right-click SystemMonitor.exe > Run as administrator.
+Tính năng mới trong hotfix39:
+- Cài đặt hiển thị có thêm lựa chọn bật/tắt Tần số quét màn hình.
+- Có kiểm tra cập nhật trong app và popup khi có bản mới.
 
 Lưu ý về fan:
 Fan control vẫn là tính năng thử nghiệm trên GPD Win Mini 7840U. Nếu fan không quay, chuyển về Auto và reboot trước khi chơi game nặng.

@@ -8,7 +8,7 @@ System Monitor Widget là widget Windows nhẹ để theo dõi hệ thống và 
 
 Bản khuyên dùng cho người dùng phổ thông:
 
-[Download SystemMonitor-hotfix38.zip](https://github.com/handsomecat101/handheld-system-monitor/raw/next/releases/SystemMonitor-hotfix38.zip)
+[Download SystemMonitor-hotfix39.zip](https://github.com/handsomecat101/handheld-system-monitor/raw/next/releases/SystemMonitor-hotfix39.zip)
 
 Nên tải bản ZIP vì trong đó đã có đủ:
 
@@ -19,11 +19,11 @@ Nên tải bản ZIP vì trong đó đã có đủ:
 
 Không khuyến nghị tải riêng file EXE nếu bạn không biết cách đặt kèm các file phụ. Nếu vẫn cần EXE riêng:
 
-[Download SystemMonitor.exe](https://github.com/handsomecat101/handheld-system-monitor/raw/next/dist-hotfix38/SystemMonitor.exe)
+[Download SystemMonitor.exe](https://github.com/handsomecat101/handheld-system-monitor/raw/next/dist-hotfix39/SystemMonitor.exe)
 
 ## Cách chạy từng bước
 
-1. Tải `SystemMonitor-hotfix38.zip`.
+1. Tải `SystemMonitor-hotfix39.zip`.
 2. Chuột phải vào file ZIP, chọn `Extract All...` hoặc `Giải nén tất cả`.
 3. Mở thư mục vừa giải nén.
 4. Double click `Run-SystemMonitor-Admin.cmd`.
@@ -39,6 +39,7 @@ Quan trọng: **phải chạy quyền Administrator nếu muốn chỉnh TDP**. 
 - Fan profile: `Off`, `Low`, `Medium`, `Max`, `Auto`.
 - Hiển thị gyro `Available/Unavailable` và nút `Off/On` đơn giản.
 - Có chế độ full/compact, ghim cửa sổ, cài đặt hiển thị block, chuyển ngôn ngữ ENG/VIE.
+- Có kiểm tra cập nhật trong app: tự báo popup khi có bản mới và có nút kiểm tra thủ công trong Cài đặt hiển thị.
 - Chạy độc lập, không cần Motion Assistant.
 
 ## Tương thích
@@ -94,8 +95,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-SystemMonito
 |-- amd/                         # runtime AMD/EC
 |-- assets/                      # icon/image
 |-- docs/                        # hướng dẫn và ảnh
-|-- dist-hotfix38/               # bản EXE mới nhất hiện tại
-|-- releases/SystemMonitor-hotfix38.zip
+|-- dist-hotfix39/               # bản EXE mới nhất hiện tại
+|-- releases/SystemMonitor-hotfix39.zip
 |-- scripts/Build-SystemMonitorExe.ps1
 |-- Launch-TdpDrainWidget.cmd
 |-- README.md
